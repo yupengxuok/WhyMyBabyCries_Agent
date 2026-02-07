@@ -41,9 +41,30 @@ MEMORY_FILE = "agent/memory.json"
 
 def load_memory():
     if not os.path.exists(MEMORY_FILE):
-        return []
-    with open(MEMORY_FILE, "r") as f:
-        return json.load(f)
+        return {
+            "care_events": [],
+            "belief_state": {},
+            "action_stats": {}
+        }
+
+    try:
+        with open(MEMORY_FILE, "r") as f:
+            content = f.read().strip()
+            if not content:
+                return {
+                    "care_events": [],
+                    "belief_state": {},
+                    "action_stats": {}
+                }
+            return json.loads(content)
+    except json.JSONDecodeError:
+        print("[Agent] Memory corrupted. Reinitializing.")
+        return {
+            "care_events": [],
+            "belief_state": {},
+            "action_stats": {}
+        }
+
 
 
 def save_memory(memory):
@@ -84,20 +105,19 @@ class CryFlowAgent:
         }
 
     def decide(self, understanding: dict) -> dict:
-        """
-        Decide what action to take based on memory & understanding.
-        """
         action_type = understanding["likely_need"]
 
-        # simple policy: prefer historically successful actions
-        confidence = 0.7
-        for record in self.memory:
-            if record["action"] == action_type:
-                confidence = max(confidence, record["confidence"])
+        stats = self.memory.get("action_stats", {})
+        action_info = stats.get(action_type, {"attempts": 0, "success": 0})
+
+        if action_info["attempts"] > 0:
+            confidence = action_info["success"] / action_info["attempts"]
+        else:
+            confidence = 0.6  # default prior
 
         return {
             "action": action_type,
-            "confidence": confidence,
+            "confidence": round(confidence, 2),
         }
 
     def act(self, decision: dict):
@@ -121,24 +141,22 @@ class CryFlowAgent:
         }
 
     def learn(self, understanding, decision, outcome):
-        """
-        Continual learning: update internal memory.
-        """
         success = outcome["cry_stopped_minutes"] <= 5
-        new_confidence = (
-            decision["confidence"] + 0.05 if success else decision["confidence"] - 0.05
-        )
 
-        record = {
+        stats = self.memory.setdefault("action_stats", {})
+        action = decision["action"]
+        if action not in stats:
+            stats[action] = {"attempts": 0, "success": 0}
+        stats[action]["attempts"] += 1
+        if success:
+            stats[action]["success"] += 1
+        self.memory.setdefault("care_events", []).append({
             "timestamp": datetime.now().isoformat(),
-            "context": understanding["context"],
-            "action": decision["action"],
-            "outcome": outcome,
-            "confidence": round(new_confidence, 2),
-        }
-
-        self.memory.append(record)
+            "action": action,
+            "outcome": outcome
+        })
         save_memory(self.memory)
+
 
     def run(self, signal: dict):
         """
