@@ -107,6 +107,7 @@ class CryFlowAgent:
         external_knowledge = you_search_summary(
             "baby crying night feeding vs soothing"
         )
+        print(f"[You.com] Top result: {external_knowledge}")
 
         likely_need = "feeding" if context["last_feed_hours"] >= 3 else "comfort"
 
