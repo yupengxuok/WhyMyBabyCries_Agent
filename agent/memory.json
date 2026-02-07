@@ -28,6 +28,20 @@
       "outcome": {
         "cry_stopped_minutes": 4
       }
+    },
+    {
+      "timestamp": "2026-02-06T16:25:26.076130",
+      "action": "feeding",
+      "outcome": {
+        "cry_stopped_minutes": 4
+      }
+    },
+    {
+      "timestamp": "2026-02-06T16:30:10.585620",
+      "action": "feeding",
+      "outcome": {
+        "cry_stopped_minutes": 4
+      }
     }
   ],
   "belief_state": {
@@ -40,8 +54,8 @@
   },
   "action_stats": {
     "feeding": {
-      "attempts": 13,
-      "success": 10
+      "attempts": 15,
+      "success": 12
     },
     "voice_soothing": {
       "attempts": 6,

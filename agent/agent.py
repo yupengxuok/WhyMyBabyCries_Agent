@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 
 # ====== Tool Interfaces (stub for hackathon) ======
+from tools.you_search import you_search
 
 def composio_execute(action: dict):
     """
@@ -26,12 +27,23 @@ def plivo_speak(message: str):
     print(f"[Plivo Voice] {message}")
 
 
-def you_search(query: str) -> str:
+def you_search_summary(query: str) -> str:
     """
-    External grounding via You.com (stub).
+    External grounding via You.com Search API.
     """
     print(f"[You.com] Searching: {query}")
-    return "General caregiving best practices for night-time crying."
+    try:
+        results = you_search(query, count=3)
+    except Exception as exc:
+        return f"Search unavailable: {exc}"
+
+    if not results:
+        return "No search results found."
+
+    top = results[0]
+    title = top.get("title") or "Result"
+    snippet = top.get("snippet") or ""
+    return f"{title}: {snippet}".strip()
 
 
 # ====== Agent Memory ======
@@ -92,9 +104,10 @@ class CryFlowAgent:
         """
         Make sense of what the agent finds.
         """
-        external_knowledge = you_search(
+        external_knowledge = you_search_summary(
             "baby crying night feeding vs soothing"
         )
+        print(f"[You.com] Top result: {external_knowledge}")
 
         likely_need = "feeding" if context["last_feed_hours"] >= 3 else "comfort"
 
