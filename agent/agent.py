@@ -105,20 +105,53 @@ class CryFlowAgent:
         }
 
     def decide(self, understanding: dict) -> dict:
-        action_type = understanding["likely_need"]
+    # 1. 从 belief_state 推断哭因
+        belief = self.memory.get("belief_state", {}).get("night_cry", {})
 
+        if belief:
+            predicted_reason = max(belief, key=belief.get)
+            base_confidence = belief[predicted_reason]
+        else:
+            predicted_reason = understanding["likely_need"]
+            base_confidence = 0.5
+
+    # 2. 原因 → 行为 映射（必须在函数内部）
+        reason_to_action = {
+            "hunger": "feeding",
+            "emotional_comfort": "comfort",
+            "discomfort": "diaper_check",
+            "unknown": understanding["likely_need"]
+        }
+
+        action_type = reason_to_action.get(
+            predicted_reason,
+            understanding["likely_need"]
+        )
+
+        # 3. 结合历史 action 成功率
         stats = self.memory.get("action_stats", {})
         action_info = stats.get(action_type, {"attempts": 0, "success": 0})
 
         if action_info["attempts"] > 0:
-            confidence = action_info["success"] / action_info["attempts"]
+            success_rate = action_info["success"] / action_info["attempts"]
+            confidence = round((base_confidence + success_rate) / 2, 2)
         else:
-            confidence = 0.6  # default prior
+            confidence = round(base_confidence, 2)
+
+        # 4. 打印 agent 的“思考结果”（Demo 关键）
+        print(
+            f"[Agent Belief] Likely cause: {predicted_reason} "
+            f"({int(base_confidence * 100)}%)"
+        )
 
         return {
             "action": action_type,
-            "confidence": round(confidence, 2),
+            "confidence": confidence,
+            "reason": predicted_reason
         }
+
+
+
 
     def act(self, decision: dict):
         """
