@@ -1,5 +1,7 @@
+import cgi
 import json
 import os
+import statistics
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -11,11 +13,12 @@ except Exception:
     pass
 
 MEMORY_FILE = os.path.join("agent", "memory.json")
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+UPLOAD_DIR = "uploads"
+MAX_AUDIO_BYTES = 10 * 1024 * 1024
 
 from audio.analysis import new_audio_id, stub_gemini_result
 from db.sqlite_store import (
+    fetch_events_by_category,
     fetch_events_since,
     fetch_recent_events,
     get_event_by_id,
@@ -24,6 +27,7 @@ from db.sqlite_store import (
     update_event_payload,
     migrate_events_from_memory,
 )
+from engine.learning import load_reasoning_priors, update_reasoning_priors
 from engine.engine import run_reasoning
 
 
@@ -61,6 +65,22 @@ def _new_event_id():
     return f"evt_{stamp}"
 
 
+def _safe_json_loads(raw_value, default_value):
+    if not isinstance(raw_value, str):
+        return default_value
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return default_value
+    return parsed
+
+
+def _median(values):
+    if not values:
+        return None
+    return float(statistics.median(values))
+
+
 CRYING_NOTICE = (
     "Crying insights are generated based on sound patterns and recent care history.\n"
     "They are probabilistic suggestions to assist caregivers, not medical diagnoses."
@@ -92,6 +112,58 @@ class APIMockHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return None
 
+    def _read_multipart_form(self):
+        form = cgi.FieldStorage(
+            fp=self.rfile,
+            headers=self.headers,
+            environ={
+                "REQUEST_METHOD": "POST",
+                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+            },
+            keep_blank_values=True,
+        )
+
+        body = {
+            "occurred_at": form.getvalue("occurred_at"),
+            "source": form.getvalue("source"),
+            "audio_id": form.getvalue("audio_id"),
+            "audio_url": form.getvalue("audio_url"),
+            "payload": {},
+            "tags": [],
+        }
+
+        payload_raw = form.getvalue("payload")
+        if payload_raw:
+            body["payload"] = _safe_json_loads(payload_raw, {})
+
+        tags_raw = form.getvalue("tags")
+        if tags_raw:
+            parsed_tags = _safe_json_loads(tags_raw, [])
+            if isinstance(parsed_tags, list):
+                body["tags"] = parsed_tags
+
+        audio_file = None
+        for field_name in ("audio", "audio_file", "file"):
+            if field_name in form and getattr(form[field_name], "filename", None):
+                audio_file = form[field_name]
+                break
+
+        if audio_file is not None:
+            audio_bytes = audio_file.file.read()
+            body["_audio_upload"] = {
+                "bytes": audio_bytes,
+                "filename": audio_file.filename or "audio.bin",
+                "mime_type": audio_file.type or "application/octet-stream",
+            }
+
+        return body
+
+    def _parse_crying_input(self):
+        content_type = (self.headers.get("Content-Type", "") or "").lower()
+        if content_type.startswith("multipart/form-data"):
+            return self._read_multipart_form()
+        return self._read_json()
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -120,11 +192,17 @@ class APIMockHandler(BaseHTTPRequestHandler):
         if parsed.path == "/docs":
             self._handle_docs()
             return
+        if parsed.path == "/metrics":
+            self._handle_metrics_page()
+            return
         if parsed.path == "/health":
             self._send_json(200, {"ok": True, "status": "healthy"})
             return
         if parsed.path == "/api/events/recent":
             self._handle_get_recent(parsed.query)
+            return
+        if parsed.path == "/api/metrics":
+            self._handle_get_metrics()
             return
         if parsed.path.startswith("/api/events/"):
             self._handle_get_event_by_id(parsed.path)
@@ -154,14 +232,43 @@ class APIMockHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"ok": True, "event": event})
 
     def _handle_post_crying(self):
-        body = self._read_json()
-        if body is None:
+        body = self._parse_crying_input()
+        if body is None or not isinstance(body, dict):
             self._send_json(400, {"ok": False, "error": "Invalid JSON"})
             return
 
         payload = body.get("payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
+        tags = body.get("tags", [])
+        if not isinstance(tags, list):
+            tags = []
+
+        audio_upload = body.get("_audio_upload")
+        audio_bytes = None
+        audio_mime_type = None
+        if isinstance(audio_upload, dict):
+            raw_audio = audio_upload.get("bytes")
+            if isinstance(raw_audio, (bytes, bytearray)):
+                audio_bytes = bytes(raw_audio)
+            if audio_bytes and len(audio_bytes) > MAX_AUDIO_BYTES:
+                self._send_json(413, {"ok": False, "error": "Audio file too large"})
+                return
+            audio_mime_type = audio_upload.get("mime_type") or "application/octet-stream"
+
         payload.pop("ai_guidance", None)
         payload["audio_id"] = body.get("audio_id") or payload.get("audio_id") or new_audio_id()
+        if audio_bytes:
+            original_name = ""
+            if isinstance(audio_upload, dict):
+                original_name = audio_upload.get("filename") or ""
+            extension = os.path.splitext(original_name)[1] or ".bin"
+            audio_file_path = os.path.join(UPLOAD_DIR, f"{payload['audio_id']}{extension}")
+            with open(audio_file_path, "wb") as f:
+                f.write(audio_bytes)
+            payload["audio_path"] = audio_file_path.replace("\\", "/")
+            payload["audio_mime_type"] = audio_mime_type
+
         payload["audio_url"] = body.get("audio_url") or payload.get("audio_url")
         payload["notice"] = CRYING_NOTICE
         if "audio_analysis" not in payload:
@@ -176,7 +283,7 @@ class APIMockHandler(BaseHTTPRequestHandler):
             "source": body.get("source", "device"),
             "category": "crying",
             "payload": payload,
-            "tags": body.get("tags", []),
+            "tags": tags,
             "created_at": _iso_now(),
         }
         insert_event(event)
@@ -185,10 +292,19 @@ class APIMockHandler(BaseHTTPRequestHandler):
             item for item in fetch_recent_events(20, None)
             if item.get("id") != event.get("id")
         ]
-        ai_guidance, error = run_reasoning(event, recent_events)
-        if ai_guidance:
+        priors = load_reasoning_priors(MEMORY_FILE)
+        enrichment, error = run_reasoning(
+            event,
+            recent_events,
+            audio_bytes=audio_bytes,
+            audio_mime_type=audio_mime_type,
+            learned_priors=priors,
+        )
+        if enrichment:
             payload = dict(event.get("payload", {}))
-            payload["ai_guidance"] = ai_guidance
+            payload["audio_analysis"] = enrichment["audio_analysis"]
+            payload["ai"] = enrichment["audio_analysis"]
+            payload["ai_guidance"] = enrichment["ai_guidance"]
             payload["notice"] = CRYING_NOTICE
             update_event_payload(event["id"], payload)
             event["payload"] = payload
@@ -247,6 +363,121 @@ class APIMockHandler(BaseHTTPRequestHandler):
         }
         self._send_json(200, {"ok": True, "summary": summary})
 
+    def _build_metrics(self):
+        crying_events = fetch_events_by_category("crying")
+        helpful_total = 0
+        helpful_hits = 0
+        resolved_minutes = []
+
+        with_context_total = 0
+        with_context_helpful = 0
+        limited_context_total = 0
+        limited_context_helpful = 0
+
+        for event in crying_events:
+            payload = event.get("payload", {})
+            if not isinstance(payload, dict):
+                continue
+
+            feedback = payload.get("user_feedback")
+            if not isinstance(feedback, dict):
+                continue
+            helpful = feedback.get("helpful")
+            if not isinstance(helpful, bool):
+                continue
+
+            helpful_total += 1
+            if helpful:
+                helpful_hits += 1
+
+            resolved_in = feedback.get("resolved_in_minutes")
+            if isinstance(resolved_in, (int, float)):
+                resolved_minutes.append(float(resolved_in))
+
+            ai_guidance = payload.get("ai_guidance")
+            has_limited_context = isinstance(ai_guidance, dict) and bool(ai_guidance.get("uncertainty_note"))
+            if has_limited_context:
+                limited_context_total += 1
+                if helpful:
+                    limited_context_helpful += 1
+            else:
+                with_context_total += 1
+                if helpful:
+                    with_context_helpful += 1
+
+        helpful_rate = None
+        if helpful_total > 0:
+            helpful_rate = round(helpful_hits / helpful_total, 4)
+
+        with_context_rate = None
+        if with_context_total > 0:
+            with_context_rate = round(with_context_helpful / with_context_total, 4)
+
+        limited_context_rate = None
+        if limited_context_total > 0:
+            limited_context_rate = round(limited_context_helpful / limited_context_total, 4)
+
+        return {
+            "helpful_rate": helpful_rate,
+            "median_resolved_minutes": _median(resolved_minutes),
+            "context_comparison": {
+                "with_context": {
+                    "samples": with_context_total,
+                    "helpful_rate": with_context_rate,
+                },
+                "limited_context": {
+                    "samples": limited_context_total,
+                    "helpful_rate": limited_context_rate,
+                },
+            },
+            "totals": {
+                "crying_events": len(crying_events),
+                "feedback_events": helpful_total,
+            },
+        }
+
+    def _handle_get_metrics(self):
+        self._send_json(200, {"ok": True, "metrics": self._build_metrics()})
+
+    def _handle_metrics_page(self):
+        html = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WMBC Metrics</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2rem; background: #f7f8fa; color: #111; }
+    .card { max-width: 920px; background: white; border-radius: 12px; padding: 1.2rem; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+    pre { white-space: pre-wrap; background: #10151c; color: #d8ecff; border-radius: 10px; padding: 1rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Care Guidance Metrics</h2>
+    <p>Live metrics from <code>/api/metrics</code></p>
+    <pre id="output">Loading...</pre>
+  </div>
+  <script>
+    fetch('/api/metrics')
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+      })
+      .catch(function (err) {
+        document.getElementById('output').textContent = 'Error: ' + err;
+      });
+  </script>
+</body>
+</html>"""
+        body = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _handle_get_event_by_id(self, path):
         parts = path.rstrip("/").split("/")
         if len(parts) != 4:
@@ -275,9 +506,12 @@ class APIMockHandler(BaseHTTPRequestHandler):
             return
         payload = dict(event.get("payload", {}))
         payload["user_feedback"] = feedback
+        learning_update = update_reasoning_priors(MEMORY_FILE, event, feedback)
+        if learning_update:
+            payload["learning_update"] = learning_update
         update_event_payload(event_id, payload)
         event["payload"] = payload
-        self._send_json(200, {"ok": True, "event": event})
+        self._send_json(200, {"ok": True, "event": event, "learning": learning_update})
 
     def _handle_root(self):
         payload = {
@@ -290,7 +524,9 @@ class APIMockHandler(BaseHTTPRequestHandler):
                 "GET /api/events/recent",
                 "GET /api/events/{id}",
                 "GET /api/context/summary",
+                "GET /api/metrics",
                 "GET /docs",
+                "GET /metrics",
                 "GET /health"
             ]
         }
@@ -315,6 +551,7 @@ class APIMockHandler(BaseHTTPRequestHandler):
                 {
                     "method": "POST",
                     "path": "/api/events/crying",
+                    "content_types": ["application/json", "multipart/form-data"],
                     "body": {
                         "occurred_at": "2026-02-08T10:02:00Z",
                         "audio_id": "aud_20260208_100200_000000",
@@ -353,6 +590,14 @@ class APIMockHandler(BaseHTTPRequestHandler):
                 },
                 {
                     "method": "GET",
+                    "path": "/api/metrics"
+                },
+                {
+                    "method": "GET",
+                    "path": "/metrics"
+                },
+                {
+                    "method": "GET",
                     "path": "/health"
                 }
             ]
@@ -362,6 +607,7 @@ class APIMockHandler(BaseHTTPRequestHandler):
 
 def run(host="0.0.0.0", port=8000):
     init_db()
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
     migrated = migrate_events_from_memory(MEMORY_FILE)
     if migrated:
         print(f"[API Mock] Migrated {migrated} events from memory.json")

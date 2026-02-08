@@ -1,23 +1,34 @@
 {
-  "most_likely_cause": {
-    "label": "string",
-    "confidence": "number",
-    "reasoning": "string"
+  "audio_analysis": {
+    "transcription": "string",
+    "inference": {
+      "hunger": "number [0,1]",
+      "discomfort": "number [0,1]",
+      "emotional_need": "number [0,1]",
+      "unknown": "number [0,1]"
+    }
   },
-  "alternative_causes": [
-    {
+  "ai_guidance": {
+    "most_likely_cause": {
       "label": "string",
-      "confidence": "number"
-    }
-  ],
-  "recommended_actions": [
-    {
-      "step": "number",
-      "action": "string",
-      "rationale": "string"
-    }
-  ],
-  "caregiver_notice": "string",
-  "confidence_level": "string",
-  "uncertainty_note": "string (optional)"
+      "confidence": "number [0,1]",
+      "reasoning": "string"
+    },
+    "alternative_causes": [
+      {
+        "label": "string",
+        "confidence": "number [0,1]"
+      }
+    ],
+    "recommended_actions": [
+      {
+        "step": "number",
+        "action": "string",
+        "rationale": "string"
+      }
+    ],
+    "caregiver_notice": "string",
+    "confidence_level": "string (derived by backend)",
+    "uncertainty_note": "string (optional, set by backend)"
+  }
 }

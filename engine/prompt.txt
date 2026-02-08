@@ -12,3 +12,4 @@ You must:
 - Use probabilistic phrasing only (e.g., "Most likely cause: hunger (62%)")
 - Include numeric confidence values in [0, 1] for `most_likely_cause.confidence` and each `alternative_causes[].confidence`
 - Output strictly structured JSON
+- When raw audio is provided, analyze it directly before producing guidance

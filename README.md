@@ -29,7 +29,11 @@ Request body:
 `category` typically uses: `feeding|diaper|sleep|comfort|unknown`
 
 ### `POST /api/events/crying`
-Request body:
+Supported content types:
+- `application/json`
+- `multipart/form-data` (recommended for raw audio upload)
+
+JSON request body:
 ```json
 {
   "occurred_at": "2026-02-08T10:02:00Z",
@@ -49,9 +53,16 @@ Request body:
   "tags": ["optional"]
 }
 ```
+Multipart example:
+```bash
+curl -X POST http://localhost:8000/api/events/crying \
+  -F "occurred_at=2026-02-08T10:02:00Z" \
+  -F "audio=@./sample.wav" \
+  -F "payload={\"note\":\"night cry\"}"
+```
 Response notes:
 - Event is always saved.
-- On Gemini success: `payload.ai_guidance` is present.
+- On Gemini success: backend sends raw audio to Gemini and writes `payload.audio_analysis` + `payload.ai_guidance`.
 - On Gemini failure: `payload.ai_guidance` is omitted, and `payload.notice` includes fallback text.
 
 ### `POST /api/events/feedback`
@@ -68,6 +79,7 @@ Request body:
 ```
 Behavior:
 - Writes feedback into the same event under `payload.user_feedback`.
+- Updates `reasoning_priors` in `agent/memory.json` for next reasoning call.
 
 ### `GET /api/events/recent`
 Query params:
@@ -81,6 +93,14 @@ Behavior:
 ### `GET /api/context/summary`
 Behavior:
 - Returns last 24h counters + latest events + `belief_state`.
+
+### `GET /api/metrics`
+Behavior:
+- Returns `helpful_rate`, `median_resolved_minutes`, and context vs limited-context comparison.
+
+### `GET /metrics`
+Behavior:
+- Lightweight HTML page rendering `/api/metrics` for demo.
 
 Quick health/doc routes:
 - `GET /health`
@@ -116,7 +136,9 @@ Endpoints:
 - `GET /api/events/recent?limit=50&since=2026-02-08T00:00:00Z`
 - `GET /api/events/{id}`
 - `GET /api/context/summary`
+- `GET /api/metrics`
 - `GET /docs`
+- `GET /metrics`
 - `GET /health`
 
 Manual event example:
@@ -161,3 +183,7 @@ Event shape (simplified):
 For crying events, `payload.ai_guidance` includes:
 - `confidence_level`: derived by backend from `most_likely_cause.confidence` (`high`/`medium`/`low`)
 - `uncertainty_note`: optional, set when recent care context is limited
+
+Feedback learning:
+- Priors are stored in `agent/memory.json` under `reasoning_priors`.
+- Update rule: `+0.05` when feedback is helpful, `-0.05` otherwise, then normalized.

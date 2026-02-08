@@ -5,6 +5,7 @@ Care Reasoning Engine design notes:
 - The system prioritizes stability over AI completeness.
 """
 
+import base64
 import json
 import os
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ import requests
 
 PROMPT_FILE = os.path.join("engine", "prompt.txt")
 SCHEMA_FILE = os.path.join("engine", "schema.json")
+CAUSE_LABELS = ("hunger", "discomfort", "emotional_need", "unknown")
 
 
 def _load_prompt():
@@ -70,7 +72,7 @@ def _build_recent_summary(recent_events):
         "last_feeding_minutes_ago": last_feeding_minutes,
         "last_diaper_minutes_ago": last_diaper_minutes,
         "last_sleep_minutes_ago": last_sleep_minutes,
-        "last_sleep_duration_min": last_sleep_duration
+        "last_sleep_duration_min": last_sleep_duration,
     }
 
 
@@ -83,7 +85,7 @@ def _collect_recent_guidance(recent_events, limit=3):
         if not isinstance(payload, dict):
             continue
         ai_guidance = payload.get("ai_guidance")
-        if not ai_guidance:
+        if not isinstance(ai_guidance, dict):
             continue
         guidance.append(
             {
@@ -117,17 +119,50 @@ def _extract_json(text):
         return None
 
 
-def _validate_output(payload):
-    def _is_probability(value):
-        return isinstance(value, (int, float)) and 0 <= value <= 1
+def _is_probability(value):
+    return isinstance(value, (int, float)) and 0 <= value <= 1
 
+
+def _normalize_inference(inference):
+    normalized = {label: 0.0 for label in CAUSE_LABELS}
+    if isinstance(inference, dict):
+        for label in CAUSE_LABELS:
+            value = inference.get(label)
+            if isinstance(value, (int, float)) and value >= 0:
+                normalized[label] = float(value)
+    total = sum(normalized.values())
+    if total <= 0:
+        normalized = {label: 0.0 for label in CAUSE_LABELS}
+        normalized["unknown"] = 1.0
+    else:
+        for label in normalized:
+            normalized[label] = round(normalized[label] / total, 4)
+    return normalized
+
+
+def _validate_audio_analysis(payload):
     if not isinstance(payload, dict):
-        return False, "Output is not a JSON object."
+        return False, "audio_analysis must be an object"
+    transcription = payload.get("transcription")
+    if transcription is not None and not isinstance(transcription, str):
+        return False, "audio_analysis.transcription must be a string"
+    inference = payload.get("inference")
+    if not isinstance(inference, dict):
+        return False, "audio_analysis.inference must be an object"
+    has_prob = any(_is_probability(inference.get(label)) for label in CAUSE_LABELS)
+    if not has_prob:
+        return False, "audio_analysis.inference must include probability values in [0,1]"
+    return True, ""
+
+
+def _validate_guidance_output(payload):
+    if not isinstance(payload, dict):
+        return False, "Guidance output is not a JSON object."
     required_top = [
         "most_likely_cause",
         "alternative_causes",
         "recommended_actions",
-        "caregiver_notice"
+        "caregiver_notice",
     ]
     for key in required_top:
         if key not in payload:
@@ -177,7 +212,30 @@ def _has_limited_context(recent_summary, recent_events):
     return missing >= 2
 
 
-def _finalize_guidance(payload, recent_summary, recent_events):
+def _apply_prior_blend(guidance, learned_priors):
+    if not isinstance(learned_priors, dict):
+        return guidance
+    most_likely = guidance.get("most_likely_cause")
+    if not isinstance(most_likely, dict):
+        return guidance
+    label = most_likely.get("label")
+    prior = learned_priors.get(label)
+    confidence = most_likely.get("confidence")
+    if not _is_probability(prior) or not _is_probability(confidence):
+        return guidance
+    blended = round((0.7 * confidence) + (0.3 * prior), 4)
+    most_likely["confidence"] = blended
+    guidance["most_likely_cause"] = most_likely
+    guidance["prior_weight"] = {
+        "label": label,
+        "prior": prior,
+        "strategy": "0.7_model + 0.3_feedback_prior",
+    }
+    return guidance
+
+
+def _finalize_guidance(payload, recent_summary, recent_events, learned_priors):
+    payload = _apply_prior_blend(payload, learned_priors)
     confidence = payload["most_likely_cause"]["confidence"]
     payload["confidence_level"] = _derive_confidence_level(confidence)
     if _has_limited_context(recent_summary, recent_events):
@@ -187,7 +245,19 @@ def _finalize_guidance(payload, recent_summary, recent_events):
     return payload
 
 
-def _call_gemini(prompt, user_input, api_key, api_endpoint):
+def _build_output_contract():
+    return (
+        "Return JSON only with exactly two top-level keys: "
+        "`audio_analysis` and `ai_guidance`.\n"
+        "`audio_analysis` must include `transcription` and `inference` "
+        "with probabilities in [0,1] for hunger, discomfort, emotional_need, unknown.\n"
+        "`ai_guidance` must include: most_likely_cause(label, confidence, reasoning), "
+        "alternative_causes(list of label+confidence), recommended_actions(list), "
+        "caregiver_notice."
+    )
+
+
+def _call_gemini(prompt, user_input, api_key, api_endpoint, audio_bytes=None, audio_mime_type=None):
     if not api_key:
         return None, "GEMINI_API_KEY not set"
     if not api_endpoint:
@@ -197,21 +267,30 @@ def _call_gemini(prompt, user_input, api_key, api_endpoint):
     if "key=" not in api_endpoint:
         api_endpoint = f"{api_endpoint}?key={api_key}"
 
-    payload = {
-        "contents": [
+    parts = [
+        {"text": prompt},
+        {"text": json.dumps(user_input, ensure_ascii=False)},
+    ]
+    if audio_bytes:
+        parts.append(
             {
-                "role": "user",
-                "parts": [
-                    {"text": prompt},
-                    {"text": json.dumps(user_input, ensure_ascii=False)}
-                ]
+                "inlineData": {
+                    "mimeType": audio_mime_type or "audio/wav",
+                    "data": base64.b64encode(audio_bytes).decode("ascii"),
+                }
             }
-        ]
-    }
+        )
+
+    request_payload = {"contents": [{"role": "user", "parts": parts}]}
     try:
-        response = requests.post(api_endpoint, json=payload, headers=headers, timeout=20)
+        response = requests.post(
+            api_endpoint,
+            json=request_payload,
+            headers=headers,
+            timeout=30,
+        )
         if response.status_code >= 400:
-            return None, f"Gemini HTTP {response.status_code}"
+            return None, f"Gemini HTTP {response.status_code}: {response.text[:300]}"
         data = response.json()
     except Exception as exc:
         return None, f"Gemini request failed: {exc}"
@@ -224,55 +303,98 @@ def _call_gemini(prompt, user_input, api_key, api_endpoint):
     return text, ""
 
 
-def run_reasoning(current_event, recent_events):
+def run_reasoning(
+    current_event,
+    recent_events,
+    audio_bytes=None,
+    audio_mime_type=None,
+    learned_priors=None,
+):
     prompt = _load_prompt()
     schema = _load_schema()
 
-    audio_analysis = {}
     payload = current_event.get("payload", {})
-    if isinstance(payload, dict):
-        audio_analysis = payload.get("audio_analysis") or {}
-
+    if not isinstance(payload, dict):
+        payload = {}
     recent_summary = _build_recent_summary(recent_events)
 
     user_input = {
         "current_event": {
             "type": "crying",
             "time": current_event.get("occurred_at"),
-            "audio_analysis": audio_analysis
         },
         "recent_care_summary": recent_summary,
         "recent_ai_guidance": _collect_recent_guidance(recent_events),
+        "learned_priors": learned_priors or {},
         "constraints": {
             "no_medical_advice": True,
             "tone": "supportive",
-            "target_audience": "caregiver"
-        }
+            "target_audience": "caregiver",
+        },
     }
+    if not audio_bytes:
+        user_input["current_event"]["audio_analysis"] = payload.get("audio_analysis") or {}
 
+    full_prompt = f"{prompt}\n\n{_build_output_contract()}"
     api_key = os.getenv("GEMINI_API_KEY", "")
     api_endpoint = os.getenv("GEMINI_API_ENDPOINT", "")
-    raw_text, error = _call_gemini(prompt, user_input, api_key, api_endpoint)
+    raw_text, error = _call_gemini(
+        full_prompt,
+        user_input,
+        api_key,
+        api_endpoint,
+        audio_bytes=audio_bytes,
+        audio_mime_type=audio_mime_type,
+    )
     if error:
         return None, {
             "error": error,
             "schema": schema,
-            "input": user_input
+            "input": user_input,
         }
 
     parsed = _extract_json(raw_text)
     if parsed is None:
         return None, {
             "error": "Gemini output is not valid JSON",
-            "raw_text": raw_text
+            "raw_text": raw_text,
         }
 
-    ok, message = _validate_output(parsed)
+    audio_analysis = parsed.get("audio_analysis")
+    ai_guidance = parsed.get("ai_guidance")
+
+    # Backward compatibility: if model returns guidance-only shape.
+    if not isinstance(ai_guidance, dict) and isinstance(parsed.get("most_likely_cause"), dict):
+        ai_guidance = parsed
+    if not isinstance(audio_analysis, dict):
+        audio_analysis = payload.get("audio_analysis") or {}
+
+    ok, message = _validate_audio_analysis(audio_analysis)
     if not ok:
         return None, {
             "error": message,
-            "raw_output": parsed
+            "raw_output": parsed,
         }
 
-    parsed = _finalize_guidance(parsed, recent_summary, recent_events)
-    return parsed, None
+    ok, message = _validate_guidance_output(ai_guidance)
+    if not ok:
+        return None, {
+            "error": message,
+            "raw_output": parsed,
+        }
+
+    normalized_analysis = {
+        "transcription": audio_analysis.get("transcription", ""),
+        "inference": _normalize_inference(audio_analysis.get("inference")),
+    }
+    finalized_guidance = _finalize_guidance(
+        ai_guidance,
+        recent_summary,
+        recent_events,
+        learned_priors or {},
+    )
+
+    return {
+        "audio_analysis": normalized_analysis,
+        "ai_guidance": finalized_guidance,
+    }, None

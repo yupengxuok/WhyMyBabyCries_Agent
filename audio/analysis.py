@@ -8,14 +8,13 @@ def new_audio_id():
 
 def stub_gemini_result():
     return {
-        "top_reason": "hunger",
-        "confidence": 0.82,
-        "scores": {
-            "hunger": 0.82,
-            "discomfort": 0.10,
-            "emotional_comfort": 0.06,
-            "unknown": 0.02
+        "transcription": "high-pitched crying",
+        "inference": {
+            "hunger": 0.62,
+            "discomfort": 0.23,
+            "emotional_need": 0.10,
+            "unknown": 0.05,
         },
-        "model": "gemini-1.5",
-        "version": datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        "model": "gemini-3",
+        "version": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
     }

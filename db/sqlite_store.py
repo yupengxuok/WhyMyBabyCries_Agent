@@ -123,6 +123,20 @@ def fetch_events_since(cutoff_dt):
     return [row_to_event(row) for row in rows]
 
 
+def fetch_events_by_category(category):
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT * FROM events
+        WHERE category = ?
+        ORDER BY occurred_at DESC
+        """,
+        (category,)
+    ).fetchall()
+    conn.close()
+    return [row_to_event(row) for row in rows]
+
+
 def get_event_by_id(event_id):
     conn = get_conn()
     row = conn.execute(
