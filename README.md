@@ -1,63 +1,71 @@
 # WhyMyBabyCries_Agent
-## How to Run
 
-This project is implemented as an **agent-first backend system**.
-No frontend or web server is required to run the agent.
+Agent-first backend with a shared event schema for manual logs and AI crying analysis.
 
-### Prerequisites
-
+**Requirements**
 - Python 3.9+
-- No external services are required for the demo (all integrations are stubbed)
 
-### Project Structure
+**Run API Mock (for frontend)**
+```bash
+python app.py
+```
+API base: `http://localhost:8000`
 
-WhyMyBabyCries_Agent/
-├── agent/
-│ ├── agent.py # Core autonomous agent
-│ ├── memory.json # Persistent agent memory (continual learning)
-│ └── prompt.txt # Agent behavior charter
-└── README.md
+**Config (.env)**
+Create a `.env` file in the project root:
+```
+GEMINI_API_KEY=your_key_here
+GEMINI_API_ENDPOINT=your_endpoint_here
+```
 
+The server loads `.env` automatically.
+If Gemini is not configured or the call fails, the crying event is still saved but `ai_guidance` will be omitted.
 
-### Running the Agent
+Endpoints:
+- `POST /api/events/manual`
+- `POST /api/events/crying`
+- `POST /api/events/feedback`
+- `GET /api/events/recent?limit=50&since=2026-02-08T00:00:00Z`
+- `GET /api/events/{id}`
+- `GET /api/context/summary`
+- `GET /docs`
+- `GET /health`
 
-From the project root directory:
+Manual event example:
+```bash
+curl -X POST http://localhost:8000/api/events/manual \
+  -H "Content-Type: application/json" \
+  -d '{"category":"feeding","payload":{"amount_ml":90}}'
+```
 
+Crying event example:
+```bash
+curl -X POST http://localhost:8000/api/events/crying \
+  -H "Content-Type: application/json" \
+  -d '{"audio_url":"s3://bucket/cry.wav","payload":{"note":"after nap"}}'
+```
+
+**Run the Agent (writes to the same event store)**
 ```bash
 python agent/agent.py
-Each run executes one full autonomous agent cycle:
+```
 
-Observe → Interpret → Decide → Act → Learn
+**Event Store**
+- All events are stored in SQLite at `db.sqlite`.
+- Manual logs and AI analysis share the same schema.
+- Agent belief state remains in `agent/memory.json` under `belief_state`.
+ - Care reasoning module lives in `engine/`.
 
-Running the agent multiple times demonstrates continual learning, as the agent updates its internal memory and confidence based on outcomes.
-
-Expected Output
-Example output:
-
-[You.com] Searching: baby crying night feeding vs soothing
-[Agent Belief] Likely cause: hunger (60%)
-[Composio] Executing action: {'action': 'feeding', 'confidence': 0.68, 'reason': 'hunger'}
-Agent cycle complete.
-The output shows:
-
-The agent’s inferred belief
-
-The selected action
-
-The confidence and reasoning behind the decision
-
-Continual Learning Demonstration
-Run the agent multiple times:
-
-python agent/agent.py
-python agent/agent.py
-Then inspect agent/memory.json to observe how:
-
-Action attempt counts increase
-
-Success rates influence future decisions
-
-Confidence evolves over time
-
-This demonstrates outcome-driven continual learning without model retraining.
-
+Event shape (simplified):
+```json
+{
+  "id": "evt_20260208_0001",
+  "type": "manual|crying",
+  "occurred_at": "2026-02-08T09:30:12Z",
+  "source": "parent|device|agent",
+  "category": "feeding|diaper|sleep|crying|comfort|unknown",
+  "payload": {},
+  "tags": [],
+  "created_at": "2026-02-08T09:31:00Z"
+}
+```

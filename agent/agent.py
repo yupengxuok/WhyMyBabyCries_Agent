@@ -50,11 +50,19 @@ def you_search_summary(query: str) -> str:
 
 MEMORY_FILE = "agent/memory.json"
 
+def _iso_now():
+    return datetime.utcnow().isoformat() + "Z"
+
+
+def _new_event_id():
+    stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    return f"evt_{stamp}"
+
 
 def load_memory():
     if not os.path.exists(MEMORY_FILE):
         return {
-            "care_events": [],
+            "events": [],
             "belief_state": {},
             "action_stats": {}
         }
@@ -64,15 +72,19 @@ def load_memory():
             content = f.read().strip()
             if not content:
                 return {
-                    "care_events": [],
+                    "events": [],
                     "belief_state": {},
                     "action_stats": {}
                 }
-            return json.loads(content)
+            data = json.loads(content)
+            data.setdefault("events", [])
+            data.setdefault("belief_state", {})
+            data.setdefault("action_stats", {})
+            return data
     except json.JSONDecodeError:
         print("[Agent] Memory corrupted. Reinitializing.")
         return {
-            "care_events": [],
+            "events": [],
             "belief_state": {},
             "action_stats": {}
         }
@@ -196,11 +208,21 @@ class CryFlowAgent:
         stats[action]["attempts"] += 1
         if success:
             stats[action]["success"] += 1
-        self.memory.setdefault("care_events", []).append({
-            "timestamp": datetime.now().isoformat(),
-            "action": action,
-            "outcome": outcome
-        })
+        event = {
+            "id": _new_event_id(),
+            "type": "manual",
+            "occurred_at": _iso_now(),
+            "source": "agent",
+            "category": action,
+            "payload": {
+                "reason": decision["reason"],
+                "confidence": decision["confidence"],
+                "outcome": outcome
+            },
+            "tags": ["agent"],
+            "created_at": _iso_now()
+        }
+        self.memory.setdefault("events", []).append(event)
         save_memory(self.memory)
 
 

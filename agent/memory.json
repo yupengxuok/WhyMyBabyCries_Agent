@@ -1,49 +1,4 @@
 {
-  "care_events": [
-    {
-      "timestamp": "2026-02-06T02:10:00",
-      "event": "feeding"
-    },
-    {
-      "timestamp": "2026-02-06T04:30:00",
-      "event": "diaper_change"
-    },
-    {
-      "timestamp": "2026-02-06T15:59:46.905673",
-      "action": "feeding",
-      "outcome": {
-        "cry_stopped_minutes": 4
-      }
-    },
-    {
-      "timestamp": "2026-02-06T16:01:03.383037",
-      "action": "feeding",
-      "outcome": {
-        "cry_stopped_minutes": 4
-      }
-    },
-    {
-      "timestamp": "2026-02-06T16:13:08.558335",
-      "action": "feeding",
-      "outcome": {
-        "cry_stopped_minutes": 4
-      }
-    },
-    {
-      "timestamp": "2026-02-06T16:25:26.076130",
-      "action": "feeding",
-      "outcome": {
-        "cry_stopped_minutes": 4
-      }
-    },
-    {
-      "timestamp": "2026-02-06T16:30:10.585620",
-      "action": "feeding",
-      "outcome": {
-        "cry_stopped_minutes": 4
-      }
-    }
-  ],
   "belief_state": {
     "night_cry": {
       "hunger": 0.6,

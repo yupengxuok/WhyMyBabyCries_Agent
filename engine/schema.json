@@ -1,0 +1,22 @@
+{
+  "most_likely_cause": {
+    "label": "string",
+    "confidence": "number",
+    "reasoning": "string"
+  },
+  "alternative_causes": [
+    {
+      "label": "string",
+      "confidence": "number"
+    }
+  ],
+  "recommended_actions": [
+    {
+      "step": "number",
+      "action": "string",
+      "rationale": "string"
+    }
+  ],
+  "caregiver_notice": "string",
+  "confidence_level": "string"
+}
