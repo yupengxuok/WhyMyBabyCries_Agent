@@ -17,6 +17,10 @@ MEMORY_FILE = os.path.join("agent", "memory.json")
 UPLOAD_DIR = "uploads"
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
 AB_AUTO_SPLIT = os.getenv("AB_AUTO_SPLIT", "false").lower() == "true"
+LIVE_CHUNK_MAX_BYTES = 512 * 1024
+LIVE_PARTIAL_EVERY_CHUNKS = 3
+LIVE_STREAM_TIMEOUT_SEC = 300
+LIVE_STREAMS = {}
 
 from audio.analysis import new_audio_id, stub_gemini_result
 from db.sqlite_store import (
@@ -68,6 +72,26 @@ def _load_belief_state():
 def _new_event_id():
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     return f"evt_{stamp}"
+
+
+def _new_stream_id():
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    return f"str_{stamp}"
+
+
+def _mime_extension(mime_type):
+    mime = (mime_type or "").lower()
+    if "wav" in mime:
+        return ".wav"
+    if "webm" in mime:
+        return ".webm"
+    if "mpeg" in mime or "mp3" in mime:
+        return ".mp3"
+    if "ogg" in mime:
+        return ".ogg"
+    if "aac" in mime:
+        return ".aac"
+    return ".bin"
 
 
 def _safe_json_loads(raw_value, default_value):
@@ -222,6 +246,161 @@ class APIMockHandler(BaseHTTPRequestHandler):
             return self._read_multipart_form()
         return self._read_json()
 
+    def _read_live_chunk_form(self):
+        form = cgi.FieldStorage(
+            fp=self.rfile,
+            headers=self.headers,
+            environ={
+                "REQUEST_METHOD": "POST",
+                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+            },
+            keep_blank_values=True,
+        )
+        payload = {
+            "stream_id": form.getvalue("stream_id"),
+            "mime_type": form.getvalue("mime_type"),
+        }
+        chunk_file = None
+        for field_name in ("chunk", "audio", "file"):
+            if field_name in form and getattr(form[field_name], "filename", None):
+                chunk_file = form[field_name]
+                break
+        if chunk_file is not None:
+            payload["chunk"] = {
+                "bytes": chunk_file.file.read(),
+                "filename": chunk_file.filename or "chunk.bin",
+                "mime_type": chunk_file.type or payload["mime_type"] or "application/octet-stream",
+            }
+        return payload
+
+    def _cleanup_stale_live_streams(self):
+        now = datetime.now(timezone.utc)
+        stale_stream_ids = []
+        for stream_id, state in LIVE_STREAMS.items():
+            last_seen = state.get("last_activity")
+            if not isinstance(last_seen, datetime):
+                continue
+            if (now - last_seen).total_seconds() > LIVE_STREAM_TIMEOUT_SEC:
+                stale_stream_ids.append(stream_id)
+
+        for stream_id in stale_stream_ids:
+            state = LIVE_STREAMS.get(stream_id)
+            if not isinstance(state, dict):
+                continue
+            event_id = state.get("event_id")
+            event = get_event_by_id(event_id)
+            if event:
+                payload = dict(event.get("payload", {}))
+                streaming = payload.get("streaming")
+                if not isinstance(streaming, dict):
+                    streaming = {}
+                streaming["status"] = "completed"
+                streaming["ended_at"] = _iso_now()
+                streaming["ended_reason"] = "timeout"
+                payload["streaming"] = streaming
+                payload["notice"] = self._compose_notice(include_guidance_unavailable=True)
+                update_event_payload(event_id, payload)
+            LIVE_STREAMS.pop(stream_id, None)
+            print(f"[LiveStream] Auto-completed stale stream: {stream_id}")
+
+    def _recent_events_excluding(self, event_id):
+        return [
+            item for item in fetch_recent_events(20, None)
+            if item.get("id") != event_id
+        ]
+
+    def _apply_reasoning_to_event(self, event, audio_bytes, audio_mime_type, assigned_variant):
+        recent_events = self._recent_events_excluding(event.get("id"))
+        priors = load_reasoning_priors(MEMORY_FILE, event.get("occurred_at"))
+        enrichment, error = run_reasoning(
+            event,
+            recent_events,
+            audio_bytes=audio_bytes,
+            audio_mime_type=audio_mime_type,
+            learned_priors=priors,
+        )
+        control_enrichment = None
+        control_error = None
+        if enrichment:
+            control_event = {
+                "id": event["id"],
+                "type": event["type"],
+                "occurred_at": event["occurred_at"],
+                "payload": {"audio_analysis": enrichment["audio_analysis"]},
+            }
+            control_enrichment, control_error = run_reasoning(
+                control_event,
+                [],
+                audio_bytes=None,
+                audio_mime_type=None,
+                learned_priors={},
+            )
+
+        if enrichment:
+            payload = dict(event.get("payload", {}))
+            treatment_guidance = enrichment.get("ai_guidance")
+            treatment_meta = enrichment.get("ai_meta", {})
+            control_guidance = control_enrichment.get("ai_guidance") if isinstance(control_enrichment, dict) else None
+            control_meta = control_enrichment.get("ai_meta", {}) if isinstance(control_enrichment, dict) else {}
+
+            shown_variant = "treatment"
+            shown_guidance = treatment_guidance
+            shown_meta = treatment_meta
+            if assigned_variant == "control" and control_guidance:
+                shown_variant = "control"
+                shown_guidance = control_guidance
+                shown_meta = control_meta
+
+            payload["audio_analysis"] = enrichment["audio_analysis"]
+            payload["ai"] = enrichment["audio_analysis"]
+            payload["ai_guidance"] = shown_guidance
+            payload["ai_meta"] = shown_meta
+            payload["ab_test"] = {
+                "assigned_variant": assigned_variant,
+                "shown_variant": shown_variant,
+                "auto_split_enabled": AB_AUTO_SPLIT,
+                "baseline_mode": "no_context_no_prior",
+                "treatment": {
+                    "ai_guidance": treatment_guidance,
+                    "ai_meta": treatment_meta,
+                },
+                "control": {
+                    "ai_guidance": control_guidance,
+                    "ai_meta": control_meta,
+                },
+            }
+            if control_error:
+                payload["ab_test"]["control_error"] = control_error
+
+            event["payload"] = payload
+            add_safety = self._should_add_safety_notice(event, recent_events)
+            payload["notice"] = self._compose_notice(include_safety=add_safety)
+            update_event_payload(event["id"], payload)
+            event["payload"] = payload
+            return event, True, None
+
+        payload = dict(event.get("payload", {}))
+        payload.pop("ai_guidance", None)
+        ai_meta = error.get("ai_meta", {}) if isinstance(error, dict) else {}
+        payload["ai_meta"] = ai_meta
+        payload["ab_test"] = {
+            "assigned_variant": assigned_variant,
+            "shown_variant": None,
+            "auto_split_enabled": AB_AUTO_SPLIT,
+            "baseline_mode": "no_context_no_prior",
+            "treatment_error": error,
+        }
+        event["payload"] = payload
+        add_safety = self._should_add_safety_notice(event, recent_events)
+        payload["notice"] = self._compose_notice(
+            include_guidance_unavailable=True,
+            include_safety=add_safety,
+        )
+        update_event_payload(event["id"], payload)
+        event["payload"] = payload
+        print(f"[CareReasoning][BestEffort] Guidance unavailable: {error}")
+        return event, False, error
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -233,6 +412,15 @@ class APIMockHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/events/manual":
             self._handle_post_manual()
+            return
+        if parsed.path == "/api/events/crying/live/start":
+            self._handle_live_start()
+            return
+        if parsed.path == "/api/events/crying/live/chunk":
+            self._handle_live_chunk()
+            return
+        if parsed.path == "/api/events/crying/live/finish":
+            self._handle_live_finish()
             return
         if parsed.path == "/api/events/crying":
             self._handle_post_crying()
@@ -346,100 +534,311 @@ class APIMockHandler(BaseHTTPRequestHandler):
         }
         insert_event(event)
 
-        recent_events = [
-            item for item in fetch_recent_events(20, None)
-            if item.get("id") != event.get("id")
-        ]
         assigned_variant = self._resolve_ab_variant(body.get("ab_variant"), event["id"])
+        event, _, _ = self._apply_reasoning_to_event(
+            event,
+            audio_bytes=audio_bytes,
+            audio_mime_type=audio_mime_type,
+            assigned_variant=assigned_variant,
+        )
+
+        self._send_json(200, {"ok": True, "event": event})
+
+    def _handle_live_start(self):
+        self._cleanup_stale_live_streams()
+        body = self._read_json()
+        if body is None:
+            self._send_json(400, {"ok": False, "error": "Invalid JSON"})
+            return
+
+        payload = body.get("payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
+        tags = body.get("tags", [])
+        if not isinstance(tags, list):
+            tags = []
+
+        stream_id = _new_stream_id()
+        event_id = _new_event_id()
+        audio_id = body.get("audio_id") or payload.get("audio_id") or new_audio_id()
+        mime_type = body.get("audio_mime_type") or "audio/webm"
+        extension = _mime_extension(mime_type)
+        live_file_path = os.path.join(UPLOAD_DIR, "live", f"{stream_id}{extension}")
+
+        assigned_variant = self._resolve_ab_variant(body.get("ab_variant"), event_id)
+        streaming = {
+            "stream_id": stream_id,
+            "status": "streaming",
+            "started_at": _iso_now(),
+            "last_chunk_at": None,
+            "chunks_received": 0,
+            "partial_every_chunks": LIVE_PARTIAL_EVERY_CHUNKS,
+            "partial_updates": [],
+            "assigned_variant": assigned_variant,
+        }
+
+        payload.pop("ai_guidance", None)
+        payload["audio_id"] = audio_id
+        payload["audio_mime_type"] = mime_type
+        payload["audio_path"] = live_file_path.replace("\\", "/")
+        payload["notice"] = self._compose_notice()
+        payload["streaming"] = streaming
+
+        event = {
+            "id": event_id,
+            "type": "crying",
+            "occurred_at": body.get("occurred_at") or _iso_now(),
+            "source": body.get("source", "device"),
+            "category": "crying",
+            "payload": payload,
+            "tags": tags,
+            "created_at": _iso_now(),
+        }
+        insert_event(event)
+
+        LIVE_STREAMS[stream_id] = {
+            "event_id": event_id,
+            "file_path": live_file_path,
+            "audio_mime_type": mime_type,
+            "chunk_count": 0,
+            "total_bytes": 0,
+            "last_activity": datetime.now(timezone.utc),
+            "assigned_variant": assigned_variant,
+        }
+
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "stream_id": stream_id,
+                "event_id": event_id,
+                "status": "streaming",
+                "partial_every_chunks": LIVE_PARTIAL_EVERY_CHUNKS,
+            },
+        )
+
+    def _handle_live_chunk(self):
+        self._cleanup_stale_live_streams()
+        content_type = (self.headers.get("Content-Type", "") or "").lower()
+        if not content_type.startswith("multipart/form-data"):
+            self._send_json(400, {"ok": False, "error": "Use multipart/form-data"})
+            return
+
+        body = self._read_live_chunk_form()
+        stream_id = body.get("stream_id")
+        if not stream_id:
+            self._send_json(400, {"ok": False, "error": "stream_id is required"})
+            return
+
+        stream_state = LIVE_STREAMS.get(stream_id)
+        if not isinstance(stream_state, dict):
+            self._send_json(404, {"ok": False, "error": "Stream not found"})
+            return
+
+        chunk = body.get("chunk")
+        if not isinstance(chunk, dict):
+            self._send_json(400, {"ok": False, "error": "Audio chunk is required"})
+            return
+        chunk_bytes = chunk.get("bytes")
+        if not isinstance(chunk_bytes, (bytes, bytearray)):
+            self._send_json(400, {"ok": False, "error": "Invalid chunk bytes"})
+            return
+        chunk_bytes = bytes(chunk_bytes)
+        if len(chunk_bytes) > LIVE_CHUNK_MAX_BYTES:
+            self._send_json(413, {"ok": False, "error": "Chunk too large"})
+            return
+
+        event = get_event_by_id(stream_state.get("event_id"))
+        if not event:
+            LIVE_STREAMS.pop(stream_id, None)
+            self._send_json(404, {"ok": False, "error": "Event not found for stream"})
+            return
+
+        live_path = stream_state.get("file_path")
+        if not live_path:
+            self._send_json(500, {"ok": False, "error": "Stream file path missing"})
+            return
+
+        with open(live_path, "ab") as f:
+            f.write(chunk_bytes)
+
+        stream_state["chunk_count"] = int(stream_state.get("chunk_count", 0)) + 1
+        stream_state["total_bytes"] = int(stream_state.get("total_bytes", 0)) + len(chunk_bytes)
+        stream_state["last_activity"] = datetime.now(timezone.utc)
+        if body.get("mime_type"):
+            stream_state["audio_mime_type"] = body.get("mime_type")
+
+        payload = dict(event.get("payload", {}))
+        streaming = payload.get("streaming")
+        if not isinstance(streaming, dict):
+            streaming = {}
+        streaming["status"] = "streaming"
+        streaming["last_chunk_at"] = _iso_now()
+        streaming["chunks_received"] = stream_state["chunk_count"]
+        streaming["total_bytes"] = stream_state["total_bytes"]
+        payload["streaming"] = streaming
+        update_event_payload(event["id"], payload)
+        event["payload"] = payload
+
+        if stream_state["chunk_count"] % LIVE_PARTIAL_EVERY_CHUNKS != 0:
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "stream_id": stream_id,
+                    "status": "buffering",
+                    "chunks_received": stream_state["chunk_count"],
+                    "next_partial_in_chunks": LIVE_PARTIAL_EVERY_CHUNKS - (stream_state["chunk_count"] % LIVE_PARTIAL_EVERY_CHUNKS),
+                },
+            )
+            return
+
+        with open(live_path, "rb") as f:
+            merged_audio = f.read()
+
+        recent_events = self._recent_events_excluding(event.get("id"))
         priors = load_reasoning_priors(MEMORY_FILE, event.get("occurred_at"))
         enrichment, error = run_reasoning(
             event,
             recent_events,
-            audio_bytes=audio_bytes,
-            audio_mime_type=audio_mime_type,
+            audio_bytes=merged_audio,
+            audio_mime_type=stream_state.get("audio_mime_type"),
             learned_priors=priors,
         )
-        control_enrichment = None
-        control_error = None
-        if enrichment:
-            control_event = {
-                "id": event["id"],
-                "type": event["type"],
-                "occurred_at": event["occurred_at"],
-                "payload": {"audio_analysis": enrichment["audio_analysis"]},
-            }
-            control_enrichment, control_error = run_reasoning(
-                control_event,
-                [],
-                audio_bytes=None,
-                audio_mime_type=None,
-                learned_priors={},
-            )
 
         if enrichment:
-            payload = dict(event.get("payload", {}))
-            treatment_guidance = enrichment.get("ai_guidance")
-            treatment_meta = enrichment.get("ai_meta", {})
-            control_guidance = control_enrichment.get("ai_guidance") if isinstance(control_enrichment, dict) else None
-            control_meta = control_enrichment.get("ai_meta", {}) if isinstance(control_enrichment, dict) else {}
-
-            shown_variant = "treatment"
-            shown_guidance = treatment_guidance
-            shown_meta = treatment_meta
-            if assigned_variant == "control" and control_guidance:
-                shown_variant = "control"
-                shown_guidance = control_guidance
-                shown_meta = control_meta
-
-            payload["audio_analysis"] = enrichment["audio_analysis"]
-            payload["ai"] = enrichment["audio_analysis"]
-            payload["ai_guidance"] = shown_guidance
-            payload["ai_meta"] = shown_meta
-            payload["ab_test"] = {
-                "assigned_variant": assigned_variant,
-                "shown_variant": shown_variant,
-                "auto_split_enabled": AB_AUTO_SPLIT,
-                "baseline_mode": "no_context_no_prior",
-                "treatment": {
-                    "ai_guidance": treatment_guidance,
-                    "ai_meta": treatment_meta,
-                },
-                "control": {
-                    "ai_guidance": control_guidance,
-                    "ai_meta": control_meta,
-                },
+            guidance = enrichment.get("ai_guidance", {})
+            first_action = None
+            actions = guidance.get("recommended_actions")
+            if isinstance(actions, list) and actions:
+                first = actions[0]
+                if isinstance(first, dict):
+                    first_action = first.get("action")
+            partial_guidance = {
+                "most_likely_cause": guidance.get("most_likely_cause", {}),
+                "recommended_next_action": first_action,
+                "confidence_level": guidance.get("confidence_level"),
             }
-            if control_error:
-                payload["ab_test"]["control_error"] = control_error
+            partial_meta = dict(enrichment.get("ai_meta", {}))
+            partial_meta["request_mode"] = "multimodal_partial"
 
-            event["payload"] = payload
-            add_safety = self._should_add_safety_notice(event, recent_events)
-            payload["notice"] = self._compose_notice(include_safety=add_safety)
-            update_event_payload(event["id"], payload)
-            event["payload"] = payload
-        elif error:
             payload = dict(event.get("payload", {}))
-            payload.pop("ai_guidance", None)
-            ai_meta = error.get("ai_meta", {}) if isinstance(error, dict) else {}
-            payload["ai_meta"] = ai_meta
-            payload["ab_test"] = {
-                "assigned_variant": assigned_variant,
-                "shown_variant": None,
-                "auto_split_enabled": AB_AUTO_SPLIT,
-                "baseline_mode": "no_context_no_prior",
-                "treatment_error": error,
-            }
-            event["payload"] = payload
-            add_safety = self._should_add_safety_notice(event, recent_events)
-            payload["notice"] = self._compose_notice(
-                include_guidance_unavailable=True,
-                include_safety=add_safety,
+            streaming = payload.get("streaming")
+            if not isinstance(streaming, dict):
+                streaming = {}
+            updates = streaming.get("partial_updates")
+            if not isinstance(updates, list):
+                updates = []
+            updates.append(
+                {
+                    "at": _iso_now(),
+                    "chunks_received": stream_state["chunk_count"],
+                    "partial_guidance": partial_guidance,
+                    "ai_meta": partial_meta,
+                }
             )
+            streaming["partial_updates"] = updates[-20:]
+            streaming["last_partial_guidance"] = partial_guidance
+            payload["streaming"] = streaming
+            payload["audio_analysis"] = enrichment.get("audio_analysis", payload.get("audio_analysis"))
+            payload["ai_meta"] = partial_meta
             update_event_payload(event["id"], payload)
-            event["payload"] = payload
-            print(f"[CareReasoning][BestEffort] Guidance unavailable: {error}")
 
-        self._send_json(200, {"ok": True, "event": event})
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "stream_id": stream_id,
+                    "partial_guidance": partial_guidance,
+                    "ai_meta": partial_meta,
+                    "stale": False,
+                },
+            )
+            return
+
+        payload = dict(event.get("payload", {}))
+        streaming = payload.get("streaming")
+        if not isinstance(streaming, dict):
+            streaming = {}
+        streaming["last_partial_error"] = error
+        payload["streaming"] = streaming
+        if isinstance(error, dict) and isinstance(error.get("ai_meta"), dict):
+            partial_meta = dict(error["ai_meta"])
+            partial_meta["request_mode"] = "multimodal_partial"
+            payload["ai_meta"] = partial_meta
+        update_event_payload(event["id"], payload)
+
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "stream_id": stream_id,
+                "partial_guidance": streaming.get("last_partial_guidance"),
+                "ai_meta": payload.get("ai_meta", {}),
+                "stale": True,
+            },
+        )
+
+    def _handle_live_finish(self):
+        self._cleanup_stale_live_streams()
+        body = self._read_json()
+        if body is None:
+            self._send_json(400, {"ok": False, "error": "Invalid JSON"})
+            return
+        stream_id = body.get("stream_id")
+        if not stream_id:
+            self._send_json(400, {"ok": False, "error": "stream_id is required"})
+            return
+
+        stream_state = LIVE_STREAMS.get(stream_id)
+        if not isinstance(stream_state, dict):
+            self._send_json(404, {"ok": False, "error": "Stream not found"})
+            return
+
+        event = get_event_by_id(stream_state.get("event_id"))
+        if not event:
+            LIVE_STREAMS.pop(stream_id, None)
+            self._send_json(404, {"ok": False, "error": "Event not found for stream"})
+            return
+
+        live_path = stream_state.get("file_path")
+        audio_bytes = b""
+        if live_path and os.path.exists(live_path):
+            with open(live_path, "rb") as f:
+                audio_bytes = f.read()
+
+        assigned_variant = stream_state.get("assigned_variant") or "treatment"
+        event, success, error = self._apply_reasoning_to_event(
+            event,
+            audio_bytes=audio_bytes,
+            audio_mime_type=stream_state.get("audio_mime_type"),
+            assigned_variant=assigned_variant,
+        )
+
+        payload = dict(event.get("payload", {}))
+        streaming = payload.get("streaming")
+        if not isinstance(streaming, dict):
+            streaming = {}
+        streaming["status"] = "completed"
+        streaming["ended_at"] = _iso_now()
+        streaming["chunks_received"] = stream_state.get("chunk_count", 0)
+        streaming["total_bytes"] = stream_state.get("total_bytes", 0)
+        if not success:
+            streaming["final_error"] = error
+        payload["streaming"] = streaming
+        update_event_payload(event["id"], payload)
+        event["payload"] = payload
+
+        LIVE_STREAMS.pop(stream_id, None)
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "stream_id": stream_id,
+                "event": event,
+                "status": "completed",
+            },
+        )
 
     def _handle_get_recent(self, query):
         params = parse_qs(query)
@@ -761,6 +1160,9 @@ class APIMockHandler(BaseHTTPRequestHandler):
             "endpoints": [
                 "POST /api/events/manual",
                 "POST /api/events/crying",
+                "POST /api/events/crying/live/start",
+                "POST /api/events/crying/live/chunk",
+                "POST /api/events/crying/live/finish",
                 "POST /api/events/feedback",
                 "GET /api/events/recent",
                 "GET /api/events/{id}",
@@ -806,6 +1208,43 @@ class APIMockHandler(BaseHTTPRequestHandler):
                         "audio_url": "s3://.../cry.wav",
                         "payload": {"note": "optional"},
                         "tags": ["optional"]
+                    }
+                },
+                {
+                    "method": "POST",
+                    "path": "/api/events/crying/live/start",
+                    "body": {
+                        "occurred_at": "2026-02-08T10:02:00Z",
+                        "ab_variant": "treatment|control (optional)",
+                        "audio_mime_type": "audio/webm",
+                        "payload": {"note": "optional"},
+                        "tags": ["optional"]
+                    },
+                    "response": {
+                        "stream_id": "str_...",
+                        "event_id": "evt_...",
+                        "status": "streaming"
+                    }
+                },
+                {
+                    "method": "POST",
+                    "path": "/api/events/crying/live/chunk",
+                    "content_types": ["multipart/form-data"],
+                    "form_fields": ["stream_id", "chunk(file)", "mime_type(optional)"],
+                    "response_notes": [
+                        "returns partial_guidance every 3 chunks",
+                        "returns stale=true on partial failure without blocking stream"
+                    ]
+                },
+                {
+                    "method": "POST",
+                    "path": "/api/events/crying/live/finish",
+                    "body": {
+                        "stream_id": "str_..."
+                    },
+                    "response": {
+                        "status": "completed",
+                        "event": "final crying event"
                     }
                 },
                 {
@@ -862,6 +1301,7 @@ class APIMockHandler(BaseHTTPRequestHandler):
 def run(host="0.0.0.0", port=8000):
     init_db()
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    os.makedirs(os.path.join(UPLOAD_DIR, "live"), exist_ok=True)
     migrated = migrate_events_from_memory(MEMORY_FILE)
     if migrated:
         print(f"[API Mock] Migrated {migrated} events from memory.json")

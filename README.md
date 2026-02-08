@@ -71,6 +71,84 @@ Response notes:
   - If omitted, backend uses treatment by default (`AB_AUTO_SPLIT=true` enables automatic split)
   - Stores both runs in `payload.ab_test` and surfaces selected one in `payload.ai_guidance`
 
+### `POST /api/events/crying/live/start`
+Request body:
+```json
+{
+  "occurred_at": "2026-02-08T10:02:00Z",
+  "ab_variant": "treatment",
+  "audio_mime_type": "audio/webm",
+  "payload": {"note": "live recording"},
+  "tags": ["optional"]
+}
+```
+Response:
+```json
+{
+  "ok": true,
+  "stream_id": "str_20260208_100200_000000",
+  "event_id": "evt_20260208_100200_000000",
+  "status": "streaming",
+  "partial_every_chunks": 3
+}
+```
+
+### `POST /api/events/crying/live/chunk`
+Content type:
+- `multipart/form-data`
+
+Form fields:
+- `stream_id` (required)
+- `chunk` (required file blob)
+- `mime_type` (optional)
+
+Response behavior:
+- Every chunk is appended to the same stream audio file.
+- Every 3 chunks backend runs partial Gemini reasoning and returns:
+  - `partial_guidance.most_likely_cause`
+  - `partial_guidance.recommended_next_action`
+  - `partial_guidance.confidence_level`
+  - `ai_meta` (`model_name`, `latency_ms`, `request_mode=multimodal_partial`)
+- On partial failure: returns `ok=true`, `stale=true`, and stream continues.
+
+Chunk response example:
+```json
+{
+  "ok": true,
+  "stream_id": "str_001",
+  "partial_guidance": {
+    "most_likely_cause": {"label": "hunger", "confidence": 0.58},
+    "recommended_next_action": "Try feeding prep while observing",
+    "confidence_level": "medium"
+  },
+  "ai_meta": {"model_name": "gemini-3", "latency_ms": 620, "request_mode": "multimodal_partial"},
+  "stale": false
+}
+```
+
+### `POST /api/events/crying/live/finish`
+Request body:
+```json
+{
+  "stream_id": "str_20260208_100200_000000"
+}
+```
+Behavior:
+- Runs final full reasoning on merged live audio.
+- Writes final `payload.audio_analysis`, `payload.ai_guidance`, `payload.ai_meta`.
+- Sets `payload.streaming.status` to `completed`.
+
+Stored in same crying event:
+- `payload.streaming.stream_id`
+- `payload.streaming.status` (`streaming|completed`)
+- `payload.streaming.partial_updates[]`
+- `payload.ai_guidance` (final)
+
+Stability rules:
+- Chunk size limit: `<= 512KB`.
+- Partial reasoning throttle: every `3` chunks.
+- Inactivity timeout: stream auto-completes after `5` minutes without chunks.
+
 ### `POST /api/events/feedback`
 Request body:
 ```json
@@ -116,6 +194,14 @@ Quick health/doc routes:
 - `GET /health`
 - `GET /docs`
 
+Frontend live flow (MediaRecorder):
+1. `POST /api/events/crying/live/start`
+2. `MediaRecorder` with `timeslice=1500ms`
+3. Each blob -> `POST /api/events/crying/live/chunk` with `stream_id`
+4. Use `partial_guidance` for real-time UI updates
+5. On stop -> `POST /api/events/crying/live/finish`
+6. Display final `payload.ai_guidance`
+
 ---
 
 Agent-first backend with a shared event schema for manual logs and AI crying analysis.
@@ -143,6 +229,9 @@ If Gemini is not configured or the call fails, the crying event is still saved, 
 Endpoints:
 - `POST /api/events/manual`
 - `POST /api/events/crying`
+- `POST /api/events/crying/live/start`
+- `POST /api/events/crying/live/chunk`
+- `POST /api/events/crying/live/finish`
 - `POST /api/events/feedback`
 - `GET /api/events/recent?limit=50&since=2026-02-08T00:00:00Z`
 - `GET /api/events/{id}`
