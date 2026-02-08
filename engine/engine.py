@@ -67,6 +67,29 @@ def _build_recent_summary(recent_events):
     }
 
 
+def _collect_recent_guidance(recent_events, limit=3):
+    guidance = []
+    for event in recent_events:
+        if event.get("category") != "crying":
+            continue
+        payload = event.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
+        ai_guidance = payload.get("ai_guidance")
+        if not ai_guidance:
+            continue
+        guidance.append(
+            {
+                "event_id": event.get("id"),
+                "occurred_at": event.get("occurred_at"),
+                "ai_guidance": ai_guidance,
+            }
+        )
+        if len(guidance) >= limit:
+            break
+    return guidance
+
+
 def _extract_json(text):
     if not text:
         return None
@@ -166,6 +189,7 @@ def run_reasoning(current_event, recent_events):
             "audio_analysis": audio_analysis
         },
         "recent_care_summary": _build_recent_summary(recent_events),
+        "recent_ai_guidance": _collect_recent_guidance(recent_events),
         "constraints": {
             "no_medical_advice": True,
             "tone": "supportive",
