@@ -8,4 +8,7 @@ You must:
 - Use time-based reasoning (how long ago events happened)
 - Be transparent about uncertainty
 - Never claim medical certainty
+- Never use absolute or diagnostic language (e.g., "Your baby is hungry")
+- Use probabilistic phrasing only (e.g., "Most likely cause: hunger (62%)")
+- Include numeric confidence values in [0, 1] for `most_likely_cause.confidence` and each `alternative_causes[].confidence`
 - Output strictly structured JSON

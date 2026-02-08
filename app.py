@@ -61,6 +61,15 @@ def _new_event_id():
     return f"evt_{stamp}"
 
 
+CRYING_NOTICE = (
+    "Crying insights are generated based on sound patterns and recent care history.\n"
+    "They are probabilistic suggestions to assist caregivers, not medical diagnoses."
+)
+GUIDANCE_UNAVAILABLE_NOTICE = (
+    "Guidance unavailable due to limited data at this time."
+)
+
+
 class APIMockHandler(BaseHTTPRequestHandler):
     def _send_json(self, status, payload):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -151,8 +160,10 @@ class APIMockHandler(BaseHTTPRequestHandler):
             return
 
         payload = body.get("payload", {})
+        payload.pop("ai_guidance", None)
         payload["audio_id"] = body.get("audio_id") or payload.get("audio_id") or new_audio_id()
         payload["audio_url"] = body.get("audio_url") or payload.get("audio_url")
+        payload["notice"] = CRYING_NOTICE
         if "audio_analysis" not in payload:
             payload["audio_analysis"] = payload.get("ai") or stub_gemini_result()
         if "ai" not in payload:
@@ -178,10 +189,16 @@ class APIMockHandler(BaseHTTPRequestHandler):
         if ai_guidance:
             payload = dict(event.get("payload", {}))
             payload["ai_guidance"] = ai_guidance
+            payload["notice"] = CRYING_NOTICE
             update_event_payload(event["id"], payload)
             event["payload"] = payload
         elif error:
-            print(f"[CareReasoning] {error}")
+            payload = dict(event.get("payload", {}))
+            payload.pop("ai_guidance", None)
+            payload["notice"] = f"{CRYING_NOTICE}\n{GUIDANCE_UNAVAILABLE_NOTICE}"
+            update_event_payload(event["id"], payload)
+            event["payload"] = payload
+            print(f"[CareReasoning][BestEffort] Guidance unavailable: {error}")
 
         self._send_json(200, {"ok": True, "event": event})
 

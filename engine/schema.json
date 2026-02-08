@@ -18,5 +18,6 @@
     }
   ],
   "caregiver_notice": "string",
-  "confidence_level": "string"
+  "confidence_level": "string",
+  "uncertainty_note": "string (optional)"
 }

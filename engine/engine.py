@@ -1,3 +1,10 @@
+"""
+Care Reasoning Engine design notes:
+- AI guidance is assistive and probabilistic.
+- User feedback is not treated as ground truth.
+- The system prioritizes stability over AI completeness.
+"""
+
 import json
 import os
 from datetime import datetime, timezone
@@ -111,14 +118,16 @@ def _extract_json(text):
 
 
 def _validate_output(payload):
+    def _is_probability(value):
+        return isinstance(value, (int, float)) and 0 <= value <= 1
+
     if not isinstance(payload, dict):
         return False, "Output is not a JSON object."
     required_top = [
         "most_likely_cause",
         "alternative_causes",
         "recommended_actions",
-        "caregiver_notice",
-        "confidence_level"
+        "caregiver_notice"
     ]
     for key in required_top:
         if key not in payload:
@@ -129,11 +138,53 @@ def _validate_output(payload):
     for key in ("label", "confidence", "reasoning"):
         if key not in mlc:
             return False, f"most_likely_cause missing {key}"
+    if not _is_probability(mlc.get("confidence")):
+        return False, "most_likely_cause.confidence must be a number in [0, 1]"
     if not isinstance(payload.get("alternative_causes"), list):
         return False, "alternative_causes must be list"
+    for item in payload.get("alternative_causes", []):
+        if not isinstance(item, dict):
+            return False, "alternative_causes items must be object"
+        if "confidence" not in item:
+            return False, "alternative_causes confidence missing"
+        if not _is_probability(item.get("confidence")):
+            return False, "alternative_causes confidence must be number in [0, 1]"
     if not isinstance(payload.get("recommended_actions"), list):
         return False, "recommended_actions must be list"
     return True, ""
+
+
+def _derive_confidence_level(score):
+    if score >= 0.75:
+        return "high"
+    if score >= 0.45:
+        return "medium"
+    return "low"
+
+
+def _has_limited_context(recent_summary, recent_events):
+    if not recent_events:
+        return True
+    key_fields = [
+        "last_feeding_minutes_ago",
+        "last_diaper_minutes_ago",
+        "last_sleep_minutes_ago",
+    ]
+    missing = 0
+    for key in key_fields:
+        if recent_summary.get(key) is None:
+            missing += 1
+    return missing >= 2
+
+
+def _finalize_guidance(payload, recent_summary, recent_events):
+    confidence = payload["most_likely_cause"]["confidence"]
+    payload["confidence_level"] = _derive_confidence_level(confidence)
+    if _has_limited_context(recent_summary, recent_events):
+        payload["uncertainty_note"] = "Limited recent care data available"
+    else:
+        payload.pop("uncertainty_note", None)
+    return payload
 
 
 def _call_gemini(prompt, user_input, api_key, api_endpoint):
@@ -182,13 +233,15 @@ def run_reasoning(current_event, recent_events):
     if isinstance(payload, dict):
         audio_analysis = payload.get("audio_analysis") or {}
 
+    recent_summary = _build_recent_summary(recent_events)
+
     user_input = {
         "current_event": {
             "type": "crying",
             "time": current_event.get("occurred_at"),
             "audio_analysis": audio_analysis
         },
-        "recent_care_summary": _build_recent_summary(recent_events),
+        "recent_care_summary": recent_summary,
         "recent_ai_guidance": _collect_recent_guidance(recent_events),
         "constraints": {
             "no_medical_advice": True,
@@ -221,4 +274,5 @@ def run_reasoning(current_event, recent_events):
             "raw_output": parsed
         }
 
+    parsed = _finalize_guidance(parsed, recent_summary, recent_events)
     return parsed, None
