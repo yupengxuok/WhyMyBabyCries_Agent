@@ -30,5 +30,10 @@
     "caregiver_notice": "string",
     "confidence_level": "string (derived by backend)",
     "uncertainty_note": "string (optional, set by backend)"
+  },
+  "ai_meta": {
+    "model_name": "string",
+    "latency_ms": "number",
+    "request_mode": "multimodal | text_contextual"
   }
 }

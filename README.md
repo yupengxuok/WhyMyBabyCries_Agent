@@ -63,7 +63,13 @@ curl -X POST http://localhost:8000/api/events/crying \
 Response notes:
 - Event is always saved.
 - On Gemini success: backend sends raw audio to Gemini and writes `payload.audio_analysis` + `payload.ai_guidance`.
+- Gemini evidence is stored under `payload.ai_meta` with `model_name`, `latency_ms`, `request_mode`.
 - On Gemini failure: `payload.ai_guidance` is omitted, and `payload.notice` includes fallback text.
+- If high-intensity crying persists above threshold, `payload.notice` also includes a non-diagnostic safety reminder.
+- Supports A/B control run:
+  - Optional `ab_variant`: `treatment|control`
+  - If omitted, backend uses treatment by default (`AB_AUTO_SPLIT=true` enables automatic split)
+  - Stores both runs in `payload.ab_test` and surfaces selected one in `payload.ai_guidance`
 
 ### `POST /api/events/feedback`
 Request body:
@@ -79,7 +85,7 @@ Request body:
 ```
 Behavior:
 - Writes feedback into the same event under `payload.user_feedback`.
-- Updates `reasoning_priors` in `agent/memory.json` for next reasoning call.
+- Updates time-bucket priors (`day`/`night`) in `agent/memory.json` for next reasoning call.
 
 ### `GET /api/events/recent`
 Query params:
@@ -97,6 +103,10 @@ Behavior:
 ### `GET /api/metrics`
 Behavior:
 - Returns `helpful_rate`, `median_resolved_minutes`, and context vs limited-context comparison.
+- Includes uplift metrics: `helpful_rate_uplift`, `median_resolved_minutes_delta`.
+- Includes A/B metrics:
+  - `ab_comparison.treatment`, `ab_comparison.control`
+  - `ab_uplift.helpful_rate_uplift`, `ab_uplift.median_resolved_minutes_delta`
 
 ### `GET /metrics`
 Behavior:
@@ -124,6 +134,7 @@ Create a `.env` file in the project root:
 ```
 GEMINI_API_KEY=your_key_here
 GEMINI_API_ENDPOINT=your_endpoint_here
+AB_AUTO_SPLIT=false
 ```
 
 The server loads `.env` automatically.
@@ -160,6 +171,17 @@ curl -X POST http://localhost:8000/api/events/crying \
 python agent/agent.py
 ```
 
+**One-Click Stable Demo**
+1. Start backend:
+```bash
+python app.py
+```
+2. In another terminal run:
+```bash
+python scripts/demo_stable_run.py --base-url http://localhost:8000
+```
+This runs: seed data -> upload audio (treatment/control) -> submit feedback -> print A/B uplift table.
+
 **Event Store**
 - All events are stored in SQLite at `db.sqlite`.
 - Manual logs and AI analysis share the same schema.
@@ -185,5 +207,5 @@ For crying events, `payload.ai_guidance` includes:
 - `uncertainty_note`: optional, set when recent care context is limited
 
 Feedback learning:
-- Priors are stored in `agent/memory.json` under `reasoning_priors`.
-- Update rule: `+0.05` when feedback is helpful, `-0.05` otherwise, then normalized.
+- Priors are stored in `agent/memory.json` under `reasoning_priors_buckets.day` and `reasoning_priors_buckets.night`.
+- Update rule: `+0.05` when feedback is helpful, `-0.05` otherwise, then normalized per time bucket.

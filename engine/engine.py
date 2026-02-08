@@ -8,6 +8,7 @@ Care Reasoning Engine design notes:
 import base64
 import json
 import os
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -34,7 +35,10 @@ def _parse_iso(value):
     try:
         if value.endswith("Z"):
             value = value[:-1] + "+00:00"
-        return datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except ValueError:
         return None
 
@@ -258,10 +262,19 @@ def _build_output_contract():
 
 
 def _call_gemini(prompt, user_input, api_key, api_endpoint, audio_bytes=None, audio_mime_type=None):
+    request_mode = "multimodal" if audio_bytes else "text_contextual"
     if not api_key:
-        return None, "GEMINI_API_KEY not set"
+        return None, {
+            "model_name": "gemini-3",
+            "latency_ms": 0,
+            "request_mode": request_mode,
+        }, "GEMINI_API_KEY not set"
     if not api_endpoint:
-        return None, "GEMINI_API_ENDPOINT not set"
+        return None, {
+            "model_name": "gemini-3",
+            "latency_ms": 0,
+            "request_mode": request_mode,
+        }, "GEMINI_API_ENDPOINT not set"
 
     headers = {"Content-Type": "application/json"}
     if "key=" not in api_endpoint:
@@ -282,6 +295,8 @@ def _call_gemini(prompt, user_input, api_key, api_endpoint, audio_bytes=None, au
         )
 
     request_payload = {"contents": [{"role": "user", "parts": parts}]}
+    start = time.perf_counter()
+    model_name = "gemini-3"
     try:
         response = requests.post(
             api_endpoint,
@@ -289,18 +304,31 @@ def _call_gemini(prompt, user_input, api_key, api_endpoint, audio_bytes=None, au
             headers=headers,
             timeout=30,
         )
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        meta = {
+            "model_name": model_name,
+            "latency_ms": latency_ms,
+            "request_mode": request_mode,
+        }
         if response.status_code >= 400:
-            return None, f"Gemini HTTP {response.status_code}: {response.text[:300]}"
+            return None, meta, f"Gemini HTTP {response.status_code}: {response.text[:300]}"
         data = response.json()
+        model_name = data.get("modelVersion") or data.get("model") or model_name
+        meta["model_name"] = model_name
     except Exception as exc:
-        return None, f"Gemini request failed: {exc}"
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        return None, {
+            "model_name": model_name,
+            "latency_ms": latency_ms,
+            "request_mode": request_mode,
+        }, f"Gemini request failed: {exc}"
 
     try:
         text = data["candidates"][0]["content"]["parts"][0]["text"]
     except Exception:
-        return None, "Gemini response parse failed"
+        return None, meta, "Gemini response parse failed"
 
-    return text, ""
+    return text, meta, ""
 
 
 def run_reasoning(
@@ -338,7 +366,7 @@ def run_reasoning(
     full_prompt = f"{prompt}\n\n{_build_output_contract()}"
     api_key = os.getenv("GEMINI_API_KEY", "")
     api_endpoint = os.getenv("GEMINI_API_ENDPOINT", "")
-    raw_text, error = _call_gemini(
+    raw_text, ai_meta, error = _call_gemini(
         full_prompt,
         user_input,
         api_key,
@@ -351,6 +379,7 @@ def run_reasoning(
             "error": error,
             "schema": schema,
             "input": user_input,
+            "ai_meta": ai_meta,
         }
 
     parsed = _extract_json(raw_text)
@@ -358,6 +387,7 @@ def run_reasoning(
         return None, {
             "error": "Gemini output is not valid JSON",
             "raw_text": raw_text,
+            "ai_meta": ai_meta,
         }
 
     audio_analysis = parsed.get("audio_analysis")
@@ -374,6 +404,7 @@ def run_reasoning(
         return None, {
             "error": message,
             "raw_output": parsed,
+            "ai_meta": ai_meta,
         }
 
     ok, message = _validate_guidance_output(ai_guidance)
@@ -381,6 +412,7 @@ def run_reasoning(
         return None, {
             "error": message,
             "raw_output": parsed,
+            "ai_meta": ai_meta,
         }
 
     normalized_analysis = {
@@ -397,4 +429,5 @@ def run_reasoning(
     return {
         "audio_analysis": normalized_analysis,
         "ai_guidance": finalized_guidance,
+        "ai_meta": ai_meta,
     }, None

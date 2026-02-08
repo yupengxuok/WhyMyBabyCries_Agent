@@ -1,4 +1,5 @@
 import cgi
+import hashlib
 import json
 import os
 import statistics
@@ -15,6 +16,7 @@ except Exception:
 MEMORY_FILE = os.path.join("agent", "memory.json")
 UPLOAD_DIR = "uploads"
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
+AB_AUTO_SPLIT = os.getenv("AB_AUTO_SPLIT", "false").lower() == "true"
 
 from audio.analysis import new_audio_id, stub_gemini_result
 from db.sqlite_store import (
@@ -41,7 +43,10 @@ def _parse_iso(value):
     try:
         if value.endswith("Z"):
             value = value[:-1] + "+00:00"
-        return datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except ValueError:
         return None
 
@@ -88,9 +93,61 @@ CRYING_NOTICE = (
 GUIDANCE_UNAVAILABLE_NOTICE = (
     "Guidance unavailable due to limited data at this time."
 )
+SAFETY_NOTICE = (
+    "If high-intensity crying continues or worsens, consider contacting a pediatric professional."
+)
+HIGH_INTENSITY_WINDOW_MIN = 60
+HIGH_INTENSITY_THRESHOLD = 3
 
 
 class APIMockHandler(BaseHTTPRequestHandler):
+    def _event_time(self, event):
+        return _parse_iso(event.get("occurred_at")) or _parse_iso(event.get("created_at"))
+
+    def _is_high_intensity(self, event):
+        payload = event.get("payload", {})
+        if not isinstance(payload, dict):
+            return False
+        analysis = payload.get("audio_analysis")
+        if not isinstance(analysis, dict):
+            return False
+        transcription = (analysis.get("transcription") or "").lower()
+        keywords = ("high", "intense", "piercing", "loud", "shrill")
+        return any(keyword in transcription for keyword in keywords)
+
+    def _should_add_safety_notice(self, current_event, recent_events):
+        current_time = self._event_time(current_event)
+        if not current_time:
+            return False
+        window_start = current_time - timedelta(minutes=HIGH_INTENSITY_WINDOW_MIN)
+        high_count = 1 if self._is_high_intensity(current_event) else 0
+        for event in recent_events:
+            if event.get("category") != "crying":
+                continue
+            event_time = self._event_time(event)
+            if not event_time:
+                continue
+            if window_start <= event_time <= current_time and self._is_high_intensity(event):
+                high_count += 1
+        return high_count >= HIGH_INTENSITY_THRESHOLD
+
+    def _compose_notice(self, include_guidance_unavailable=False, include_safety=False):
+        lines = [CRYING_NOTICE]
+        if include_guidance_unavailable:
+            lines.append(GUIDANCE_UNAVAILABLE_NOTICE)
+        if include_safety:
+            lines.append(SAFETY_NOTICE)
+        return "\n".join(lines)
+
+    def _resolve_ab_variant(self, requested_variant, event_id):
+        if requested_variant in ("treatment", "control"):
+            return requested_variant
+        if AB_AUTO_SPLIT:
+            digest = hashlib.md5(event_id.encode("utf-8")).hexdigest()
+            bucket = int(digest[:2], 16) % 2
+            return "control" if bucket == 1 else "treatment"
+        return "treatment"
+
     def _send_json(self, status, payload):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -128,6 +185,7 @@ class APIMockHandler(BaseHTTPRequestHandler):
             "source": form.getvalue("source"),
             "audio_id": form.getvalue("audio_id"),
             "audio_url": form.getvalue("audio_url"),
+            "ab_variant": form.getvalue("ab_variant"),
             "payload": {},
             "tags": [],
         }
@@ -270,7 +328,7 @@ class APIMockHandler(BaseHTTPRequestHandler):
             payload["audio_mime_type"] = audio_mime_type
 
         payload["audio_url"] = body.get("audio_url") or payload.get("audio_url")
-        payload["notice"] = CRYING_NOTICE
+        payload["notice"] = self._compose_notice()
         if "audio_analysis" not in payload:
             payload["audio_analysis"] = payload.get("ai") or stub_gemini_result()
         if "ai" not in payload:
@@ -292,7 +350,8 @@ class APIMockHandler(BaseHTTPRequestHandler):
             item for item in fetch_recent_events(20, None)
             if item.get("id") != event.get("id")
         ]
-        priors = load_reasoning_priors(MEMORY_FILE)
+        assigned_variant = self._resolve_ab_variant(body.get("ab_variant"), event["id"])
+        priors = load_reasoning_priors(MEMORY_FILE, event.get("occurred_at"))
         enrichment, error = run_reasoning(
             event,
             recent_events,
@@ -300,18 +359,82 @@ class APIMockHandler(BaseHTTPRequestHandler):
             audio_mime_type=audio_mime_type,
             learned_priors=priors,
         )
+        control_enrichment = None
+        control_error = None
+        if enrichment:
+            control_event = {
+                "id": event["id"],
+                "type": event["type"],
+                "occurred_at": event["occurred_at"],
+                "payload": {"audio_analysis": enrichment["audio_analysis"]},
+            }
+            control_enrichment, control_error = run_reasoning(
+                control_event,
+                [],
+                audio_bytes=None,
+                audio_mime_type=None,
+                learned_priors={},
+            )
+
         if enrichment:
             payload = dict(event.get("payload", {}))
+            treatment_guidance = enrichment.get("ai_guidance")
+            treatment_meta = enrichment.get("ai_meta", {})
+            control_guidance = control_enrichment.get("ai_guidance") if isinstance(control_enrichment, dict) else None
+            control_meta = control_enrichment.get("ai_meta", {}) if isinstance(control_enrichment, dict) else {}
+
+            shown_variant = "treatment"
+            shown_guidance = treatment_guidance
+            shown_meta = treatment_meta
+            if assigned_variant == "control" and control_guidance:
+                shown_variant = "control"
+                shown_guidance = control_guidance
+                shown_meta = control_meta
+
             payload["audio_analysis"] = enrichment["audio_analysis"]
             payload["ai"] = enrichment["audio_analysis"]
-            payload["ai_guidance"] = enrichment["ai_guidance"]
-            payload["notice"] = CRYING_NOTICE
+            payload["ai_guidance"] = shown_guidance
+            payload["ai_meta"] = shown_meta
+            payload["ab_test"] = {
+                "assigned_variant": assigned_variant,
+                "shown_variant": shown_variant,
+                "auto_split_enabled": AB_AUTO_SPLIT,
+                "baseline_mode": "no_context_no_prior",
+                "treatment": {
+                    "ai_guidance": treatment_guidance,
+                    "ai_meta": treatment_meta,
+                },
+                "control": {
+                    "ai_guidance": control_guidance,
+                    "ai_meta": control_meta,
+                },
+            }
+            if control_error:
+                payload["ab_test"]["control_error"] = control_error
+
+            event["payload"] = payload
+            add_safety = self._should_add_safety_notice(event, recent_events)
+            payload["notice"] = self._compose_notice(include_safety=add_safety)
             update_event_payload(event["id"], payload)
             event["payload"] = payload
         elif error:
             payload = dict(event.get("payload", {}))
             payload.pop("ai_guidance", None)
-            payload["notice"] = f"{CRYING_NOTICE}\n{GUIDANCE_UNAVAILABLE_NOTICE}"
+            ai_meta = error.get("ai_meta", {}) if isinstance(error, dict) else {}
+            payload["ai_meta"] = ai_meta
+            payload["ab_test"] = {
+                "assigned_variant": assigned_variant,
+                "shown_variant": None,
+                "auto_split_enabled": AB_AUTO_SPLIT,
+                "baseline_mode": "no_context_no_prior",
+                "treatment_error": error,
+            }
+            event["payload"] = payload
+            add_safety = self._should_add_safety_notice(event, recent_events)
+            payload["notice"] = self._compose_notice(
+                include_guidance_unavailable=True,
+                include_safety=add_safety,
+            )
             update_event_payload(event["id"], payload)
             event["payload"] = payload
             print(f"[CareReasoning][BestEffort] Guidance unavailable: {error}")
@@ -371,8 +494,16 @@ class APIMockHandler(BaseHTTPRequestHandler):
 
         with_context_total = 0
         with_context_helpful = 0
+        with_context_resolved = []
         limited_context_total = 0
         limited_context_helpful = 0
+        limited_context_resolved = []
+        ab_treatment_total = 0
+        ab_treatment_helpful = 0
+        ab_treatment_resolved = []
+        ab_control_total = 0
+        ab_control_helpful = 0
+        ab_control_resolved = []
 
         for event in crying_events:
             payload = event.get("payload", {})
@@ -400,10 +531,31 @@ class APIMockHandler(BaseHTTPRequestHandler):
                 limited_context_total += 1
                 if helpful:
                     limited_context_helpful += 1
+                if isinstance(resolved_in, (int, float)):
+                    limited_context_resolved.append(float(resolved_in))
             else:
                 with_context_total += 1
                 if helpful:
                     with_context_helpful += 1
+                if isinstance(resolved_in, (int, float)):
+                    with_context_resolved.append(float(resolved_in))
+
+            ab_test = payload.get("ab_test")
+            variant = None
+            if isinstance(ab_test, dict):
+                variant = ab_test.get("shown_variant") or ab_test.get("assigned_variant")
+            if variant == "treatment":
+                ab_treatment_total += 1
+                if helpful:
+                    ab_treatment_helpful += 1
+                if isinstance(resolved_in, (int, float)):
+                    ab_treatment_resolved.append(float(resolved_in))
+            elif variant == "control":
+                ab_control_total += 1
+                if helpful:
+                    ab_control_helpful += 1
+                if isinstance(resolved_in, (int, float)):
+                    ab_control_resolved.append(float(resolved_in))
 
         helpful_rate = None
         if helpful_total > 0:
@@ -417,18 +569,76 @@ class APIMockHandler(BaseHTTPRequestHandler):
         if limited_context_total > 0:
             limited_context_rate = round(limited_context_helpful / limited_context_total, 4)
 
+        with_context_median = _median(with_context_resolved)
+        limited_context_median = _median(limited_context_resolved)
+
+        helpful_rate_uplift = None
+        if with_context_rate is not None and limited_context_rate is not None:
+            helpful_rate_uplift = round(with_context_rate - limited_context_rate, 4)
+
+        median_resolved_minutes_delta = None
+        if with_context_median is not None and limited_context_median is not None:
+            # Positive means context-aware guidance calmed faster.
+            median_resolved_minutes_delta = round(limited_context_median - with_context_median, 2)
+
+        ab_treatment_rate = None
+        if ab_treatment_total > 0:
+            ab_treatment_rate = round(ab_treatment_helpful / ab_treatment_total, 4)
+
+        ab_control_rate = None
+        if ab_control_total > 0:
+            ab_control_rate = round(ab_control_helpful / ab_control_total, 4)
+
+        ab_treatment_median = _median(ab_treatment_resolved)
+        ab_control_median = _median(ab_control_resolved)
+
+        ab_helpful_rate_uplift = None
+        if ab_treatment_rate is not None and ab_control_rate is not None:
+            ab_helpful_rate_uplift = round(ab_treatment_rate - ab_control_rate, 4)
+
+        ab_median_resolved_minutes_delta = None
+        if ab_treatment_median is not None and ab_control_median is not None:
+            ab_median_resolved_minutes_delta = round(ab_control_median - ab_treatment_median, 2)
+
         return {
             "helpful_rate": helpful_rate,
             "median_resolved_minutes": _median(resolved_minutes),
+            "uplift": {
+                "helpful_rate_uplift": helpful_rate_uplift,
+                "median_resolved_minutes_delta": median_resolved_minutes_delta,
+            },
             "context_comparison": {
                 "with_context": {
                     "samples": with_context_total,
                     "helpful_rate": with_context_rate,
+                    "median_resolved_minutes": with_context_median,
+                },
+                "no_context": {
+                    "samples": limited_context_total,
+                    "helpful_rate": limited_context_rate,
+                    "median_resolved_minutes": limited_context_median,
                 },
                 "limited_context": {
                     "samples": limited_context_total,
                     "helpful_rate": limited_context_rate,
+                    "median_resolved_minutes": limited_context_median,
+                }
+            },
+            "ab_comparison": {
+                "treatment": {
+                    "samples": ab_treatment_total,
+                    "helpful_rate": ab_treatment_rate,
+                    "median_resolved_minutes": ab_treatment_median,
                 },
+                "control": {
+                    "samples": ab_control_total,
+                    "helpful_rate": ab_control_rate,
+                    "median_resolved_minutes": ab_control_median,
+                },
+            },
+            "ab_uplift": {
+                "helpful_rate_uplift": ab_helpful_rate_uplift,
+                "median_resolved_minutes_delta": ab_median_resolved_minutes_delta,
             },
             "totals": {
                 "crying_events": len(crying_events),
@@ -448,7 +658,10 @@ class APIMockHandler(BaseHTTPRequestHandler):
   <title>WMBC Metrics</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 2rem; background: #f7f8fa; color: #111; }
-    .card { max-width: 920px; background: white; border-radius: 12px; padding: 1.2rem; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+    .card { max-width: 980px; background: white; border-radius: 12px; padding: 1.2rem; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; }
+    th, td { border: 1px solid #dbe1e8; padding: 0.5rem; text-align: left; }
+    th { background: #f0f4f8; }
     pre { white-space: pre-wrap; background: #10151c; color: #d8ecff; border-radius: 10px; padding: 1rem; }
   </style>
 </head>
@@ -456,12 +669,40 @@ class APIMockHandler(BaseHTTPRequestHandler):
   <div class="card">
     <h2>Care Guidance Metrics</h2>
     <p>Live metrics from <code>/api/metrics</code></p>
+    <table>
+      <thead>
+        <tr><th>Variant</th><th>Samples</th><th>Helpful Rate</th><th>Median Resolved (min)</th></tr>
+      </thead>
+      <tbody id="ab_table">
+        <tr><td colspan="4">Loading...</td></tr>
+      </tbody>
+    </table>
+    <p id="uplift_line"></p>
     <pre id="output">Loading...</pre>
   </div>
   <script>
     fetch('/api/metrics')
       .then(function (res) { return res.json(); })
       .then(function (data) {
+        var metrics = data.metrics || {};
+        var ab = metrics.ab_comparison || {};
+        var treatment = ab.treatment || {};
+        var control = ab.control || {};
+        var abUplift = metrics.ab_uplift || {};
+        var show = function (value) {
+          if (value === null || value === undefined) {
+            return '-';
+          }
+          return String(value);
+        };
+        var rows = [
+          '<tr><td>Treatment</td><td>' + show(treatment.samples) + '</td><td>' + show(treatment.helpful_rate) + '</td><td>' + show(treatment.median_resolved_minutes) + '</td></tr>',
+          '<tr><td>Control</td><td>' + show(control.samples) + '</td><td>' + show(control.helpful_rate) + '</td><td>' + show(control.median_resolved_minutes) + '</td></tr>'
+        ];
+        document.getElementById('ab_table').innerHTML = rows.join('');
+        document.getElementById('uplift_line').textContent =
+          'A/B Uplift: helpful_rate=' + show(abUplift.helpful_rate_uplift) +
+          ', median_resolved_minutes_delta=' + show(abUplift.median_resolved_minutes_delta);
         document.getElementById('output').textContent = JSON.stringify(data, null, 2);
       })
       .catch(function (err) {
@@ -552,8 +793,15 @@ class APIMockHandler(BaseHTTPRequestHandler):
                     "method": "POST",
                     "path": "/api/events/crying",
                     "content_types": ["application/json", "multipart/form-data"],
+                    "response_additions": [
+                        "payload.ai_meta.model_name",
+                        "payload.ai_meta.latency_ms",
+                        "payload.ai_meta.request_mode",
+                        "payload.notice (may include safety reminder)"
+                    ],
                     "body": {
                         "occurred_at": "2026-02-08T10:02:00Z",
+                        "ab_variant": "treatment|control (optional, for A/B demo)",
                         "audio_id": "aud_20260208_100200_000000",
                         "audio_url": "s3://.../cry.wav",
                         "payload": {"note": "optional"},
@@ -590,7 +838,13 @@ class APIMockHandler(BaseHTTPRequestHandler):
                 },
                 {
                     "method": "GET",
-                    "path": "/api/metrics"
+                    "path": "/api/metrics",
+                    "contains": [
+                        "metrics.ab_uplift.helpful_rate_uplift",
+                        "metrics.ab_uplift.median_resolved_minutes_delta",
+                        "metrics.uplift.helpful_rate_uplift",
+                        "metrics.uplift.median_resolved_minutes_delta"
+                    ]
                 },
                 {
                     "method": "GET",
