@@ -4,6 +4,7 @@ import SwiftUI
 final class HomeLiveStatusViewModel: ObservableObject {
     @Published var activities: [TimelineActivity] = []
     @Published var latestGuidance: AIGuidance? = nil
+    @Published var latestPartialGuidance: PartialGuidance? = nil
     @Published var guidanceUnavailable: Bool = false
     @Published var isLoading: Bool = false
     @Published var errorMessage: String? = nil
@@ -14,6 +15,7 @@ final class HomeLiveStatusViewModel: ObservableObject {
     private let apiClient = APIClient.shared
 
     func load() async {
+        if isLoading { return }
         isLoading = true
         errorMessage = nil
         do {
@@ -33,13 +35,16 @@ final class HomeLiveStatusViewModel: ObservableObject {
             if let latestCrying = events.first(where: { $0.category == "crying" }) {
                 if let guidance = latestCrying.payload?.aiGuidance {
                     latestGuidance = guidance
+                    latestPartialGuidance = nil
                     guidanceUnavailable = false
                 } else {
                     latestGuidance = nil
+                    latestPartialGuidance = latestCrying.payload?.streaming?.lastPartialGuidance
                     guidanceUnavailable = true
                 }
             } else {
                 latestGuidance = nil
+                latestPartialGuidance = nil
                 guidanceUnavailable = false
             }
             isLoading = false
@@ -48,6 +53,7 @@ final class HomeLiveStatusViewModel: ObservableObject {
             errorMessage = error.localizedDescription
             activities = createMockActivities()
             latestGuidance = nil
+            latestPartialGuidance = nil
             guidanceUnavailable = false
         }
     }
@@ -81,11 +87,11 @@ final class HomeLiveStatusViewModel: ObservableObject {
 
     private func createMockActivities() -> [TimelineActivity] {
         [
-            TimelineActivity(assetName: "RecentFeeding", title: "Feeding", time: "5 mins ago · Mock"),
-            TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "30 mins ago · Mock"),
-            TimelineActivity(assetName: "RecentCrying", title: "Crying", time: "45 mins ago · Mock"),
-            TimelineActivity(assetName: "RecentFeeding", title: "Feeding", time: "1 hr ago · Mock"),
-            TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "2 hrs ago · Mock")
+            TimelineActivity(assetName: "RecentFeeding", title: "Feeding", time: "5 mins ago"),
+            TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "30 mins ago"),
+            TimelineActivity(assetName: "RecentCrying", title: "Crying", time: "45 mins ago"),
+            TimelineActivity(assetName: "RecentFeeding", title: "Feeding", time: "1 hr ago"),
+            TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "2 hrs ago")
         ]
     }
 
@@ -124,6 +130,7 @@ final class HomeLiveStatusViewModel: ObservableObject {
 
 struct HomeLiveStatusView: View {
     @StateObject private var viewModel = HomeLiveStatusViewModel()
+    private let refreshTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ZStack {
@@ -136,6 +143,7 @@ struct HomeLiveStatusView: View {
 
                     StatusInsightCard(
                         guidance: viewModel.latestGuidance,
+                        partialGuidance: viewModel.latestPartialGuidance,
                         guidanceUnavailable: viewModel.guidanceUnavailable,
                         isLoading: viewModel.isLoading
                     )
@@ -219,6 +227,7 @@ private struct HomeTopBar: View {
 
 private struct StatusInsightCard: View {
     let guidance: AIGuidance?
+    let partialGuidance: PartialGuidance?
     let guidanceUnavailable: Bool
     let isLoading: Bool
 
@@ -232,6 +241,12 @@ private struct StatusInsightCard: View {
                     .foregroundColor(.primary)
             } else if let guidance = guidance, let label = guidance.mostLikelyCause?.label {
                 let confidence = guidance.mostLikelyCause?.confidence ?? 0.8
+                let percent = Int(confidence * 100)
+                Text("\(percent)% likely \(label)")
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .foregroundColor(.primary)
+            } else if let partial = partialGuidance, let label = partial.mostLikelyCause?.label {
+                let confidence = partial.mostLikelyCause?.confidence ?? 0.8
                 let percent = Int(confidence * 100)
                 Text("\(percent)% likely \(label)")
                     .font(.system(size: 28, weight: .bold, design: .rounded))
@@ -251,7 +266,7 @@ private struct StatusInsightCard: View {
                     }
                 }
 
-                Text(guidance?.confidenceLevel?.capitalized ?? "Medium Confidence")
+                Text(guidance?.confidenceLevel?.capitalized ?? partialGuidance?.confidenceLevel?.capitalized ?? "Medium Confidence")
                     .font(.bodyRounded)
                     .foregroundColor(.softGray)
             }
