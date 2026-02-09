@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import statistics
+import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -196,8 +197,9 @@ class APIMockHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return None
 
-    def _parse_multipart(self):
+    def _parse_multipart(self, label="multipart"):
         """Parse multipart/form-data without using deprecated cgi module"""
+        start = time.perf_counter()
         content_type = self.headers.get("Content-Type", "")
         if not content_type.startswith("multipart/"):
             return {}
@@ -270,10 +272,14 @@ class APIMockHandler(BaseHTTPRequestHandler):
                     # Regular field
                     parts[field_name] = content.decode("utf-8", errors="ignore")
 
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        print(
+            f"[Multipart][{label}] bytes={length} parts={len(parts)} files={len(files)} elapsed_ms={elapsed_ms}"
+        )
         return {"parts": parts, "files": files}
 
     def _read_multipart_form(self):
-        parsed = self._parse_multipart()
+        parsed = self._parse_multipart(label="crying")
         parts = parsed.get("parts", {})
         files = parsed.get("files", {})
 
@@ -319,7 +325,7 @@ class APIMockHandler(BaseHTTPRequestHandler):
         return self._read_json()
 
     def _read_live_chunk_form(self):
-        parsed = self._parse_multipart()
+        parsed = self._parse_multipart(label="live_chunk")
         parts = parsed.get("parts", {})
         files = parsed.get("files", {})
 
@@ -379,6 +385,7 @@ class APIMockHandler(BaseHTTPRequestHandler):
     def _apply_reasoning_to_event(self, event, audio_bytes, audio_mime_type, assigned_variant):
         recent_events = self._recent_events_excluding(event.get("id"))
         priors = load_reasoning_priors(MEMORY_FILE, event.get("occurred_at"))
+        reasoning_start = time.perf_counter()
         enrichment, error = run_reasoning(
             event,
             recent_events,
@@ -386,6 +393,17 @@ class APIMockHandler(BaseHTTPRequestHandler):
             audio_mime_type=audio_mime_type,
             learned_priors=priors,
         )
+        reasoning_ms = int((time.perf_counter() - reasoning_start) * 1000)
+        if enrichment and isinstance(enrichment.get("ai_meta"), dict):
+            model_meta = enrichment.get("ai_meta", {})
+            print(
+                "[CareReasoning] total_ms="
+                f"{reasoning_ms} model={model_meta.get('model_name')} "
+                f"latency_ms={model_meta.get('latency_ms')} "
+                f"mode={model_meta.get('request_mode')}"
+            )
+        else:
+            print(f"[CareReasoning] total_ms={reasoning_ms} error={error}")
         control_enrichment = None
         control_error = None
         if enrichment:
@@ -765,6 +783,7 @@ class APIMockHandler(BaseHTTPRequestHandler):
 
         recent_events = self._recent_events_excluding(event.get("id"))
         priors = load_reasoning_priors(MEMORY_FILE, event.get("occurred_at"))
+        reasoning_start = time.perf_counter()
         enrichment, error = run_reasoning(
             event,
             recent_events,
@@ -772,6 +791,17 @@ class APIMockHandler(BaseHTTPRequestHandler):
             audio_mime_type=stream_state.get("audio_mime_type"),
             learned_priors=priors,
         )
+        reasoning_ms = int((time.perf_counter() - reasoning_start) * 1000)
+        if enrichment and isinstance(enrichment.get("ai_meta"), dict):
+            model_meta = enrichment.get("ai_meta", {})
+            print(
+                "[CareReasoning][Partial] total_ms="
+                f"{reasoning_ms} model={model_meta.get('model_name')} "
+                f"latency_ms={model_meta.get('latency_ms')} "
+                f"mode=multimodal_partial"
+            )
+        else:
+            print(f"[CareReasoning][Partial] total_ms={reasoning_ms} error={error}")
 
         if enrichment:
             guidance = enrichment.get("ai_guidance", {})
