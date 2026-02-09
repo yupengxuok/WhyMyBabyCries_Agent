@@ -1,4 +1,3 @@
-import cgi
 import hashlib
 import json
 import os
@@ -6,6 +5,9 @@ import statistics
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
+from email import message_from_string
+from email.parser import BytesParser
+import io
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 try:
@@ -194,32 +196,102 @@ class APIMockHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return None
 
+    def _parse_multipart(self):
+        """Parse multipart/form-data without using deprecated cgi module"""
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.startswith("multipart/"):
+            return {}
+
+        # Extract boundary
+        boundary = None
+        for part in content_type.split(";"):
+            part = part.strip()
+            if part.startswith("boundary="):
+                boundary = part[9:].strip('"')
+                break
+
+        if not boundary:
+            return {}
+
+        # Read raw body
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            return {}
+
+        body = self.rfile.read(length)
+
+        # Parse parts
+        parts = {}
+        files = {}
+        boundary_bytes = ("--" + boundary).encode()
+
+        sections = body.split(boundary_bytes)
+        for section in sections[1:-1]:  # Skip first empty and last closing
+            if not section or section == b"--\r\n" or section == b"--":
+                continue
+
+            # Split headers and content
+            if b"\r\n\r\n" in section:
+                header_section, content = section.split(b"\r\n\r\n", 1)
+            else:
+                continue
+
+            # Remove trailing CRLF from content
+            content = content.rstrip(b"\r\n")
+
+            # Parse headers
+            headers_text = header_section.decode("utf-8", errors="ignore")
+            field_name = None
+            filename = None
+            content_type_field = None
+
+            for line in headers_text.split("\r\n"):
+                line = line.strip()
+                if line.lower().startswith("content-disposition:"):
+                    # Extract name and filename
+                    for part in line.split(";"):
+                        part = part.strip()
+                        if part.startswith("name="):
+                            field_name = part[5:].strip('"')
+                        elif part.startswith("filename="):
+                            filename = part[9:].strip('"')
+                elif line.lower().startswith("content-type:"):
+                    content_type_field = line.split(":", 1)[1].strip()
+
+            if field_name:
+                if filename:
+                    # File field
+                    files[field_name] = {
+                        "filename": filename,
+                        "content": content,
+                        "content_type": content_type_field or "application/octet-stream"
+                    }
+                else:
+                    # Regular field
+                    parts[field_name] = content.decode("utf-8", errors="ignore")
+
+        return {"parts": parts, "files": files}
+
     def _read_multipart_form(self):
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-            },
-            keep_blank_values=True,
-        )
+        parsed = self._parse_multipart()
+        parts = parsed.get("parts", {})
+        files = parsed.get("files", {})
 
         body = {
-            "occurred_at": form.getvalue("occurred_at"),
-            "source": form.getvalue("source"),
-            "audio_id": form.getvalue("audio_id"),
-            "audio_url": form.getvalue("audio_url"),
-            "ab_variant": form.getvalue("ab_variant"),
+            "occurred_at": parts.get("occurred_at"),
+            "source": parts.get("source"),
+            "audio_id": parts.get("audio_id"),
+            "audio_url": parts.get("audio_url"),
+            "ab_variant": parts.get("ab_variant"),
             "payload": {},
             "tags": [],
         }
 
-        payload_raw = form.getvalue("payload")
+        payload_raw = parts.get("payload")
         if payload_raw:
             body["payload"] = _safe_json_loads(payload_raw, {})
 
-        tags_raw = form.getvalue("tags")
+        tags_raw = parts.get("tags")
         if tags_raw:
             parsed_tags = _safe_json_loads(tags_raw, [])
             if isinstance(parsed_tags, list):
@@ -227,16 +299,15 @@ class APIMockHandler(BaseHTTPRequestHandler):
 
         audio_file = None
         for field_name in ("audio", "audio_file", "file"):
-            if field_name in form and getattr(form[field_name], "filename", None):
-                audio_file = form[field_name]
+            if field_name in files:
+                audio_file = files[field_name]
                 break
 
         if audio_file is not None:
-            audio_bytes = audio_file.file.read()
             body["_audio_upload"] = {
-                "bytes": audio_bytes,
-                "filename": audio_file.filename or "audio.bin",
-                "mime_type": audio_file.type or "application/octet-stream",
+                "bytes": audio_file["content"],
+                "filename": audio_file["filename"] or "audio.bin",
+                "mime_type": audio_file["content_type"] or "application/octet-stream",
             }
 
         return body
@@ -248,29 +319,24 @@ class APIMockHandler(BaseHTTPRequestHandler):
         return self._read_json()
 
     def _read_live_chunk_form(self):
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-            },
-            keep_blank_values=True,
-        )
+        parsed = self._parse_multipart()
+        parts = parsed.get("parts", {})
+        files = parsed.get("files", {})
+
         payload = {
-            "stream_id": form.getvalue("stream_id"),
-            "mime_type": form.getvalue("mime_type"),
+            "stream_id": parts.get("stream_id"),
+            "mime_type": parts.get("mime_type"),
         }
         chunk_file = None
         for field_name in ("chunk", "audio", "file"):
-            if field_name in form and getattr(form[field_name], "filename", None):
-                chunk_file = form[field_name]
+            if field_name in files:
+                chunk_file = files[field_name]
                 break
         if chunk_file is not None:
             payload["chunk"] = {
-                "bytes": chunk_file.file.read(),
-                "filename": chunk_file.filename or "chunk.bin",
-                "mime_type": chunk_file.type or payload["mime_type"] or "application/octet-stream",
+                "bytes": chunk_file["content"],
+                "filename": chunk_file["filename"] or "chunk.bin",
+                "mime_type": chunk_file["content_type"] or payload["mime_type"] or "application/octet-stream",
             }
         return payload
 

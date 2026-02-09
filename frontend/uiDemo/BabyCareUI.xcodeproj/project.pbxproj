@@ -7,19 +7,27 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0D3DF551EEE2BB5E23D63D2D /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EF020845A921D10B1028D43 /* APIClient.swift */; };
+		26CD6D64CA6C3D29BBB43850 /* APITypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 793E75A4848FD7DCCACFE2ED /* APITypes.swift */; };
+		293EDD622AFADC3AD68DEDDC /* MockData.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC66AD97AC37526EB55FB4BF /* MockData.swift */; };
 		AA0000010000000000000001 /* BabyCareUIApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000010000000000000001 /* BabyCareUIApp.swift */; };
 		AA0000010000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000010000000000000002 /* ContentView.swift */; };
 		AA0000010000000000000003 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000010000000000000003 /* Theme.swift */; };
 		AA0000010000000000000004 /* HomeLiveStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000010000000000000004 /* HomeLiveStatusView.swift */; };
 		AA0000010000000000000005 /* ActivityHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000010000000000000005 /* ActivityHistoryView.swift */; };
 		AA0000010000000000000006 /* AIInsightsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000010000000000000006 /* AIInsightsView.swift */; };
+		AA0000010000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA2000010000000000000001 /* Assets.xcassets */; };
 		AA0000010000000000000008 /* CryMonitorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000010000000000000007 /* CryMonitorView.swift */; };
 		AA0000010000000000000009 /* GeminiLiveClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000010000000000000008 /* GeminiLiveClient.swift */; };
 		AA0000010000000000000010 /* AudioPCMConverter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000010000000000000009 /* AudioPCMConverter.swift */; };
-		AA0000010000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA2000010000000000000001 /* Assets.xcassets */; };
+		AC349073C533A7EB9BDCB2D9 /* DateHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4FF7B829F38933593499FAE /* DateHelpers.swift */; };
+		F70CFDF712DE0DB9A1F0A898 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86D1082FD4648A31076B6B32 /* AppConfig.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		793E75A4848FD7DCCACFE2ED /* APITypes.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = APITypes.swift; sourceTree = "<group>"; };
+		7EF020845A921D10B1028D43 /* APIClient.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
+		86D1082FD4648A31076B6B32 /* AppConfig.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
 		AA0000010000000000000100 /* BabyCareUI.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BabyCareUI.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA1000010000000000000001 /* BabyCareUIApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BabyCareUIApp.swift; sourceTree = "<group>"; };
 		AA1000010000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -32,6 +40,8 @@
 		AA1000010000000000000009 /* AudioPCMConverter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPCMConverter.swift; sourceTree = "<group>"; };
 		AA2000010000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		AA3000010000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AC66AD97AC37526EB55FB4BF /* MockData.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MockData.swift; sourceTree = "<group>"; };
+		B4FF7B829F38933593499FAE /* DateHelpers.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DateHelpers.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -64,6 +74,11 @@
 				AA0000010000000000000600 /* Views */,
 				AA0000010000000000000700 /* Resources */,
 				AA3000010000000000000001 /* Info.plist */,
+				7EF020845A921D10B1028D43 /* APIClient.swift */,
+				793E75A4848FD7DCCACFE2ED /* APITypes.swift */,
+				86D1082FD4648A31076B6B32 /* AppConfig.swift */,
+				B4FF7B829F38933593499FAE /* DateHelpers.swift */,
+				AC66AD97AC37526EB55FB4BF /* MockData.swift */,
 			);
 			path = BabyCareUI;
 			sourceTree = "<group>";
@@ -173,6 +188,11 @@
 				AA0000010000000000000008 /* CryMonitorView.swift in Sources */,
 				AA0000010000000000000009 /* GeminiLiveClient.swift in Sources */,
 				AA0000010000000000000010 /* AudioPCMConverter.swift in Sources */,
+				0D3DF551EEE2BB5E23D63D2D /* APIClient.swift in Sources */,
+				26CD6D64CA6C3D29BBB43850 /* APITypes.swift in Sources */,
+				F70CFDF712DE0DB9A1F0A898 /* AppConfig.swift in Sources */,
+				AC349073C533A7EB9BDCB2D9 /* DateHelpers.swift in Sources */,
+				293EDD622AFADC3AD68DEDDC /* MockData.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

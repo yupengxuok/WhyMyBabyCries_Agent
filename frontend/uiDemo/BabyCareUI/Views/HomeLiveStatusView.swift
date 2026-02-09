@@ -1,13 +1,94 @@
 import SwiftUI
 
+@MainActor
+final class HomeLiveStatusViewModel: ObservableObject {
+    @Published var activities: [TimelineActivity] = []
+    @Published var latestGuidance: AIGuidance? = nil
+    @Published var guidanceUnavailable: Bool = false
+    @Published var isLoading: Bool = false
+    @Published var errorMessage: String? = nil
+
+    private let apiClient = APIClient.shared
+
+    func load() async {
+        isLoading = true
+        errorMessage = nil
+        do {
+            let events = try await apiClient.getRecentEvents(limit: 10, since: nil)
+            var timelineActivities = events.map { event in
+                TimelineActivity(
+                    assetName: assetName(for: event.category),
+                    title: title(for: event.category),
+                    time: formattedRelativeTime(for: event)
+                )
+            }
+
+            // Append mock data to ensure the timeline is always well-populated
+            timelineActivities.append(contentsOf: createMockActivities())
+
+            activities = timelineActivities
+            if let latestCrying = events.first(where: { $0.category == "crying" }) {
+                if let guidance = latestCrying.payload?.aiGuidance {
+                    latestGuidance = guidance
+                    guidanceUnavailable = false
+                } else {
+                    latestGuidance = nil
+                    guidanceUnavailable = true
+                }
+            } else {
+                latestGuidance = nil
+                guidanceUnavailable = false
+            }
+            isLoading = false
+        } catch {
+            isLoading = false
+            errorMessage = error.localizedDescription
+            activities = createMockActivities()
+            latestGuidance = nil
+            guidanceUnavailable = false
+        }
+    }
+
+    private func formattedRelativeTime(for event: APIEvent) -> String {
+        if let date = DateHelpers.parseISO(event.occurredAt) {
+            return DateHelpers.relativeString(from: date)
+        }
+        return "Just now"
+    }
+
+    private func title(for category: String?) -> String {
+        switch category {
+        case "feeding": return "Feeding"
+        case "sleep": return "Sleep"
+        case "diaper": return "Diaper"
+        case "crying": return "Crying"
+        case "comfort": return "Comfort"
+        default: return "Activity"
+        }
+    }
+
+    private func assetName(for category: String?) -> String {
+        switch category {
+        case "feeding": return "RecentFeeding"
+        case "sleep": return "RecentSleeping"
+        case "crying": return "RecentCrying"
+        default: return "RecentFeeding"
+        }
+    }
+
+    private func createMockActivities() -> [TimelineActivity] {
+        [
+            TimelineActivity(assetName: "RecentFeeding", title: "Feeding", time: "5 mins ago · Mock"),
+            TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "30 mins ago · Mock"),
+            TimelineActivity(assetName: "RecentCrying", title: "Crying", time: "45 mins ago · Mock"),
+            TimelineActivity(assetName: "RecentFeeding", title: "Feeding", time: "1 hr ago · Mock"),
+            TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "2 hrs ago · Mock")
+        ]
+    }
+}
+
 struct HomeLiveStatusView: View {
-    private let activities: [TimelineActivity] = [
-        TimelineActivity(assetName: "RecentFeeding", title: "Feeding", time: "5 mins ago"),
-        TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "30 mins ago"),
-        TimelineActivity(assetName: "RecentCrying", title: "Crying", time: "45 mins ago"),
-        TimelineActivity(assetName: "RecentFeeding", title: "Feeding", time: "1 hr ago"),
-        TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "2 hrs ago")
-    ]
+    @StateObject private var viewModel = HomeLiveStatusViewModel()
 
     var body: some View {
         ZStack {
@@ -18,16 +99,23 @@ struct HomeLiveStatusView: View {
                 VStack(spacing: 22) {
                     HomeTopBar()
 
-                    StatusInsightCard()
-                        .padding(.horizontal, 20)
+                    StatusInsightCard(
+                        guidance: viewModel.latestGuidance,
+                        guidanceUnavailable: viewModel.guidanceUnavailable,
+                        isLoading: viewModel.isLoading
+                    )
+                    .padding(.horizontal, 20)
 
-                    RecentActivitySection(activities: activities)
+                    RecentActivitySection(activities: viewModel.activities)
                         .padding(.horizontal, 20)
 
                     Spacer(minLength: 16)
                 }
                 .padding(.top, 6)
             }
+        }
+        .task {
+            await viewModel.load()
         }
     }
 }
@@ -57,13 +145,29 @@ private struct HomeTopBar: View {
 }
 
 private struct StatusInsightCard: View {
+    let guidance: AIGuidance?
+    let guidanceUnavailable: Bool
+    let isLoading: Bool
+
     var body: some View {
         VStack(spacing: 16) {
             BabyIllustration()
 
-            Text("80% Likely hungry")
-                .font(.system(size: 28, weight: .bold, design: .rounded))
-                .foregroundColor(.primary)
+            if isLoading {
+                Text("Loading latest guidance...")
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundColor(.primary)
+            } else if let guidance = guidance, let label = guidance.mostLikelyCause?.label {
+                let confidence = guidance.mostLikelyCause?.confidence ?? 0.8
+                let percent = Int(confidence * 100)
+                Text("\(percent)% likely \(label)")
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .foregroundColor(.primary)
+            } else {
+                Text("80% likely hungry")
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .foregroundColor(.primary)
+            }
 
             HStack(spacing: 8) {
                 HStack(spacing: 6) {
@@ -74,7 +178,7 @@ private struct StatusInsightCard: View {
                     }
                 }
 
-                Text("Medium Confidence")
+                Text(guidance?.confidenceLevel?.capitalized ?? "Medium Confidence")
                     .font(.bodyRounded)
                     .foregroundColor(.softGray)
             }
@@ -114,20 +218,26 @@ private struct RecentActivitySection: View {
                 .fill(Color.dividerGray)
                 .frame(height: 1)
 
-            VStack(spacing: 18) {
-                ForEach(Array(activities.enumerated()), id: \.offset) { index, item in
-                    TimelineRow(activity: item, index: index)
+            if activities.isEmpty {
+                Text("No recent events.")
+                    .font(.bodyRounded)
+                    .foregroundColor(.softGray)
+            } else {
+                VStack(spacing: 18) {
+                    ForEach(Array(activities.enumerated()), id: \.offset) { index, item in
+                        TimelineRow(activity: item, index: index)
+                    }
                 }
-            }
-            .overlayPreferenceValue(TimelineDotPreferenceKey.self) { anchors in
-                GeometryReader { proxy in
-                    let points = anchors.values.map { proxy[$0] }.sorted { $0.y < $1.y }
-                    if let first = points.first, let last = points.last {
-                        Path { path in
-                            path.move(to: CGPoint(x: first.x, y: first.y))
-                            path.addLine(to: CGPoint(x: first.x, y: last.y))
+                .overlayPreferenceValue(TimelineDotPreferenceKey.self) { anchors in
+                    GeometryReader { proxy in
+                        let points = anchors.values.map { proxy[$0] }.sorted { $0.y < $1.y }
+                        if let first = points.first, let last = points.last {
+                            Path { path in
+                                path.move(to: CGPoint(x: first.x, y: first.y))
+                                path.addLine(to: CGPoint(x: first.x, y: last.y))
+                            }
+                            .stroke(Color.dividerGray, lineWidth: 2)
                         }
-                        .stroke(Color.dividerGray, lineWidth: 2)
                     }
                 }
             }
@@ -198,6 +308,11 @@ private struct HomeBackground: View {
                 endPoint: .bottom
             )
 
+            WaveShape(yOffset: 0.62, curve: 0.12)
+                .fill(Color(red: 0.89, green: 0.94, blue: 0.98))
+                .opacity(0.9)
+                .ignoresSafeArea()
+
             WaveShape(yOffset: 0.78, curve: 0.08)
                 .fill(Color(red: 0.98, green: 0.95, blue: 0.92))
                 .opacity(0.8)
@@ -233,7 +348,7 @@ private struct WaveShape: Shape {
     }
 }
 
-private struct TimelineActivity {
+struct TimelineActivity {
     let assetName: String
     let title: String
     let time: String
