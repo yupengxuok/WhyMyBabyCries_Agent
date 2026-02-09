@@ -384,18 +384,12 @@ struct CryMonitorView: View {
                     }
 
                     if let notice = viewModel.noticeText {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Notice")
-                                .font(.sectionTitle)
-                                .foregroundColor(.appBlue)
-                            Text(notice)
-                                .font(.bodyRounded)
-                                .foregroundColor(.secondary)
-                                .lineSpacing(4)
-                        }
-                        .padding(20)
-                        .cardStyle()
-                        .padding(.horizontal)
+                        Text(notice)
+                            .font(.caption)
+                            .foregroundColor(.softGray)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .padding(.horizontal)
                     }
 
                     GuidanceSection(title: "Live Guidance", guidance: viewModel.partialGuidance)
@@ -449,10 +443,6 @@ struct CryMonitorView: View {
                         .cardStyle()
                         .padding(.horizontal)
                     }
-
-                    Text(viewModel.debugInfo)
-                        .font(.caption2)
-                        .foregroundColor(.softGray)
                 }
                 .padding(.vertical, 24)
             }

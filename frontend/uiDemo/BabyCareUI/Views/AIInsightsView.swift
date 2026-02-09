@@ -118,7 +118,7 @@ private struct SummaryCountsView: View {
 }
 
 private struct BeliefStateView: View {
-    let belief: [String: Double]
+    let belief: [String: JSONValue]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -126,8 +126,8 @@ private struct BeliefStateView: View {
                 .font(.caption.weight(.bold))
                 .foregroundColor(.softGray)
             ForEach(belief.keys.sorted(), id: \.self) { key in
-                let value = belief[key] ?? 0
-                Text("\(key): \(String(format: "%.2f", value))")
+                let value = belief[key] ?? .null
+                Text("\(key): \(value.description)")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
