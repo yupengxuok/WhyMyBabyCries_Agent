@@ -403,3 +403,23 @@ struct LiveStartRequest: Encodable {
         case tags
     }
 }
+
+struct ManualEventRequest: Encodable {
+    let occurredAt: String
+    let category: String
+    let payload: [String: String]?
+    let tags: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case occurredAt = "occurred_at"
+        case category
+        case payload
+        case tags
+    }
+}
+
+struct ManualEventResponse: Codable {
+    let ok: Bool
+    let event: APIEvent?
+    let error: String?
+}
