@@ -4,13 +4,18 @@ import SwiftUI
 final class HomeLiveStatusViewModel: ObservableObject {
     @Published var activities: [TimelineActivity] = []
     @Published var latestGuidance: AIGuidance? = nil
+    @Published var latestPartialGuidance: PartialGuidance? = nil
     @Published var guidanceUnavailable: Bool = false
     @Published var isLoading: Bool = false
     @Published var errorMessage: String? = nil
+    @Published var isSubmittingEvent: Bool = false
+    @Published var showingAddEventSheet: Bool = false
+    @Published var successMessage: String? = nil
 
     private let apiClient = APIClient.shared
 
     func load() async {
+        if isLoading { return }
         isLoading = true
         errorMessage = nil
         do {
@@ -30,13 +35,16 @@ final class HomeLiveStatusViewModel: ObservableObject {
             if let latestCrying = events.first(where: { $0.category == "crying" }) {
                 if let guidance = latestCrying.payload?.aiGuidance {
                     latestGuidance = guidance
+                    latestPartialGuidance = nil
                     guidanceUnavailable = false
                 } else {
                     latestGuidance = nil
+                    latestPartialGuidance = latestCrying.payload?.streaming?.lastPartialGuidance
                     guidanceUnavailable = true
                 }
             } else {
                 latestGuidance = nil
+                latestPartialGuidance = nil
                 guidanceUnavailable = false
             }
             isLoading = false
@@ -45,6 +53,7 @@ final class HomeLiveStatusViewModel: ObservableObject {
             errorMessage = error.localizedDescription
             activities = createMockActivities()
             latestGuidance = nil
+            latestPartialGuidance = nil
             guidanceUnavailable = false
         }
     }
@@ -78,17 +87,50 @@ final class HomeLiveStatusViewModel: ObservableObject {
 
     private func createMockActivities() -> [TimelineActivity] {
         [
-            TimelineActivity(assetName: "RecentFeeding", title: "Feeding", time: "5 mins ago · Mock"),
-            TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "30 mins ago · Mock"),
-            TimelineActivity(assetName: "RecentCrying", title: "Crying", time: "45 mins ago · Mock"),
-            TimelineActivity(assetName: "RecentFeeding", title: "Feeding", time: "1 hr ago · Mock"),
-            TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "2 hrs ago · Mock")
+            TimelineActivity(assetName: "RecentFeeding", title: "Feeding", time: "5 mins ago"),
+            TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "30 mins ago"),
+            TimelineActivity(assetName: "RecentCrying", title: "Crying", time: "45 mins ago"),
+            TimelineActivity(assetName: "RecentFeeding", title: "Feeding", time: "1 hr ago"),
+            TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "2 hrs ago")
         ]
+    }
+
+    func submitManualEvent(category: String, note: String?) async {
+        isSubmittingEvent = true
+        errorMessage = nil
+        successMessage = nil
+
+        do {
+            let now = DateHelpers.isoNow()
+            var payload: [String: String]? = nil
+            if let note = note, !note.isEmpty {
+                payload = ["note": note]
+            }
+
+            let request = ManualEventRequest(
+                occurredAt: now,
+                category: category,
+                payload: payload,
+                tags: nil
+            )
+
+            _ = try await apiClient.postManualEvent(request: request)
+            successMessage = "Event added successfully"
+            showingAddEventSheet = false
+
+            // Reload events to show the new one
+            await load()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+
+        isSubmittingEvent = false
     }
 }
 
 struct HomeLiveStatusView: View {
     @StateObject private var viewModel = HomeLiveStatusViewModel()
+    private let refreshTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
 
     var body: some View {
         ZStack {
@@ -101,6 +143,7 @@ struct HomeLiveStatusView: View {
 
                     StatusInsightCard(
                         guidance: viewModel.latestGuidance,
+                        partialGuidance: viewModel.latestPartialGuidance,
                         guidanceUnavailable: viewModel.guidanceUnavailable,
                         isLoading: viewModel.isLoading
                     )
@@ -113,9 +156,47 @@ struct HomeLiveStatusView: View {
                 }
                 .padding(.top, 6)
             }
+
+            // Floating action button
+            VStack {
+                Spacer()
+                HStack {
+                    Spacer()
+                    Button(action: {
+                        viewModel.showingAddEventSheet = true
+                    }) {
+                        Image(systemName: "plus.circle.fill")
+                            .resizable()
+                            .frame(width: 56, height: 56)
+                            .foregroundColor(.blue)
+                            .background(Color.white)
+                            .clipShape(Circle())
+                            .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 4)
+                    }
+                    .padding(.trailing, 20)
+                    .padding(.bottom, 20)
+                }
+            }
+        }
+        .sheet(isPresented: $viewModel.showingAddEventSheet) {
+            AddEventSheet(viewModel: viewModel)
         }
         .task {
             await viewModel.load()
+        }
+        .alert("Success", isPresented: .constant(viewModel.successMessage != nil)) {
+            Button("OK") {
+                viewModel.successMessage = nil
+            }
+        } message: {
+            Text(viewModel.successMessage ?? "")
+        }
+        .alert("Error", isPresented: .constant(viewModel.errorMessage != nil)) {
+            Button("OK") {
+                viewModel.errorMessage = nil
+            }
+        } message: {
+            Text(viewModel.errorMessage ?? "")
         }
     }
 }
@@ -146,6 +227,7 @@ private struct HomeTopBar: View {
 
 private struct StatusInsightCard: View {
     let guidance: AIGuidance?
+    let partialGuidance: PartialGuidance?
     let guidanceUnavailable: Bool
     let isLoading: Bool
 
@@ -159,6 +241,12 @@ private struct StatusInsightCard: View {
                     .foregroundColor(.primary)
             } else if let guidance = guidance, let label = guidance.mostLikelyCause?.label {
                 let confidence = guidance.mostLikelyCause?.confidence ?? 0.8
+                let percent = Int(confidence * 100)
+                Text("\(percent)% likely \(label)")
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .foregroundColor(.primary)
+            } else if let partial = partialGuidance, let label = partial.mostLikelyCause?.label {
+                let confidence = partial.mostLikelyCause?.confidence ?? 0.8
                 let percent = Int(confidence * 100)
                 Text("\(percent)% likely \(label)")
                     .font(.system(size: 28, weight: .bold, design: .rounded))
@@ -178,7 +266,7 @@ private struct StatusInsightCard: View {
                     }
                 }
 
-                Text(guidance?.confidenceLevel?.capitalized ?? "Medium Confidence")
+                Text(guidance?.confidenceLevel?.capitalized ?? partialGuidance?.confidenceLevel?.capitalized ?? "Medium Confidence")
                     .font(.bodyRounded)
                     .foregroundColor(.softGray)
             }
@@ -352,6 +440,87 @@ struct TimelineActivity {
     let assetName: String
     let title: String
     let time: String
+}
+
+struct AddEventSheet: View {
+    @ObservedObject var viewModel: HomeLiveStatusViewModel
+    @State private var selectedCategory: String = "feeding"
+    @State private var note: String = ""
+    @Environment(\.dismiss) var dismiss
+
+    let categories = [
+        ("feeding", "Feeding", "fork.knife"),
+        ("diaper", "Diaper", "circle.hexagonpath"),
+        ("sleep", "Sleep", "bed.double.fill"),
+        ("comfort", "Comfort", "heart.fill")
+    ]
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section(header: Text("Activity Type")) {
+                    ForEach(categories, id: \.0) { category in
+                        Button(action: {
+                            selectedCategory = category.0
+                        }) {
+                            HStack {
+                                Image(systemName: category.2)
+                                    .frame(width: 24)
+                                    .foregroundColor(selectedCategory == category.0 ? .blue : .gray)
+                                Text(category.1)
+                                    .foregroundColor(.primary)
+                                Spacer()
+                                if selectedCategory == category.0 {
+                                    Image(systemName: "checkmark")
+                                        .foregroundColor(.blue)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Section(header: Text("Note (Optional)")) {
+                    TextEditor(text: $note)
+                        .frame(minHeight: 100)
+                }
+            }
+            .navigationTitle("Add Status")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Add") {
+                        Task {
+                            await viewModel.submitManualEvent(
+                                category: selectedCategory,
+                                note: note.isEmpty ? nil : note
+                            )
+                            if viewModel.successMessage != nil {
+                                dismiss()
+                            }
+                        }
+                    }
+                    .disabled(viewModel.isSubmittingEvent)
+                }
+            }
+            .overlay {
+                if viewModel.isSubmittingEvent {
+                    ZStack {
+                        Color.black.opacity(0.3)
+                            .ignoresSafeArea()
+                        ProgressView("Submitting...")
+                            .padding()
+                            .background(Color.white)
+                            .cornerRadius(10)
+                    }
+                }
+            }
+        }
+    }
 }
 
 #Preview {

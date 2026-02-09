@@ -121,6 +121,15 @@ struct APIClient {
         throw APIError.serverError(response.error ?? "Failed to finish live crying.")
     }
 
+    func postManualEvent(request: ManualEventRequest) async throws -> APIEvent {
+        let url = baseURL.appendingPathComponent("api/events/manual")
+        let response: ManualEventResponse = try await requestJSON(url: url, method: "POST", body: request)
+        if response.ok, let event = response.event {
+            return event
+        }
+        throw APIError.serverError(response.error ?? "Failed to create manual event.")
+    }
+
     private func requestJSON<T: Decodable>(url: URL, method: String, body: Encodable?) async throws -> T {
         var request = URLRequest(url: url)
         request.httpMethod = method

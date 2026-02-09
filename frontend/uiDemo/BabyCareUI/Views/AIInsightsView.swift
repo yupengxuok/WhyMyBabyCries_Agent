@@ -40,11 +40,7 @@ struct AIInsightsView: View {
                             ProgressView("Loading summary...")
                         } else if let summary = viewModel.summary {
                             SummaryCountsView(summary: summary)
-                            if let belief = summary.aiBeliefState, !belief.isEmpty {
-                                Divider()
-                                    .background(Color.dividerGray)
-                                BeliefStateView(belief: belief)
-                            }
+                            // Belief state intentionally hidden to keep the summary concise.
                         } else {
                             Text("No summary data yet.")
                                 .font(.bodyRounded)
