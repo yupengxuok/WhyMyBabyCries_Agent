@@ -7,6 +7,9 @@ final class HomeLiveStatusViewModel: ObservableObject {
     @Published var guidanceUnavailable: Bool = false
     @Published var isLoading: Bool = false
     @Published var errorMessage: String? = nil
+    @Published var isSubmittingEvent: Bool = false
+    @Published var showingAddEventSheet: Bool = false
+    @Published var successMessage: String? = nil
 
     private let apiClient = APIClient.shared
 
@@ -85,6 +88,38 @@ final class HomeLiveStatusViewModel: ObservableObject {
             TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "2 hrs ago · Mock")
         ]
     }
+
+    func submitManualEvent(category: String, note: String?) async {
+        isSubmittingEvent = true
+        errorMessage = nil
+        successMessage = nil
+
+        do {
+            let now = DateHelpers.isoNow()
+            var payload: [String: String]? = nil
+            if let note = note, !note.isEmpty {
+                payload = ["note": note]
+            }
+
+            let request = ManualEventRequest(
+                occurredAt: now,
+                category: category,
+                payload: payload,
+                tags: nil
+            )
+
+            _ = try await apiClient.postManualEvent(request: request)
+            successMessage = "Event added successfully"
+            showingAddEventSheet = false
+
+            // Reload events to show the new one
+            await load()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+
+        isSubmittingEvent = false
+    }
 }
 
 struct HomeLiveStatusView: View {
@@ -113,9 +148,47 @@ struct HomeLiveStatusView: View {
                 }
                 .padding(.top, 6)
             }
+
+            // Floating action button
+            VStack {
+                Spacer()
+                HStack {
+                    Spacer()
+                    Button(action: {
+                        viewModel.showingAddEventSheet = true
+                    }) {
+                        Image(systemName: "plus.circle.fill")
+                            .resizable()
+                            .frame(width: 56, height: 56)
+                            .foregroundColor(.blue)
+                            .background(Color.white)
+                            .clipShape(Circle())
+                            .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 4)
+                    }
+                    .padding(.trailing, 20)
+                    .padding(.bottom, 20)
+                }
+            }
+        }
+        .sheet(isPresented: $viewModel.showingAddEventSheet) {
+            AddEventSheet(viewModel: viewModel)
         }
         .task {
             await viewModel.load()
+        }
+        .alert("Success", isPresented: .constant(viewModel.successMessage != nil)) {
+            Button("OK") {
+                viewModel.successMessage = nil
+            }
+        } message: {
+            Text(viewModel.successMessage ?? "")
+        }
+        .alert("Error", isPresented: .constant(viewModel.errorMessage != nil)) {
+            Button("OK") {
+                viewModel.errorMessage = nil
+            }
+        } message: {
+            Text(viewModel.errorMessage ?? "")
         }
     }
 }
@@ -352,6 +425,87 @@ struct TimelineActivity {
     let assetName: String
     let title: String
     let time: String
+}
+
+struct AddEventSheet: View {
+    @ObservedObject var viewModel: HomeLiveStatusViewModel
+    @State private var selectedCategory: String = "feeding"
+    @State private var note: String = ""
+    @Environment(\.dismiss) var dismiss
+
+    let categories = [
+        ("feeding", "Feeding", "fork.knife"),
+        ("diaper", "Diaper", "circle.hexagonpath"),
+        ("sleep", "Sleep", "bed.double.fill"),
+        ("comfort", "Comfort", "heart.fill")
+    ]
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section(header: Text("Activity Type")) {
+                    ForEach(categories, id: \.0) { category in
+                        Button(action: {
+                            selectedCategory = category.0
+                        }) {
+                            HStack {
+                                Image(systemName: category.2)
+                                    .frame(width: 24)
+                                    .foregroundColor(selectedCategory == category.0 ? .blue : .gray)
+                                Text(category.1)
+                                    .foregroundColor(.primary)
+                                Spacer()
+                                if selectedCategory == category.0 {
+                                    Image(systemName: "checkmark")
+                                        .foregroundColor(.blue)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Section(header: Text("Note (Optional)")) {
+                    TextEditor(text: $note)
+                        .frame(minHeight: 100)
+                }
+            }
+            .navigationTitle("Add Status")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Add") {
+                        Task {
+                            await viewModel.submitManualEvent(
+                                category: selectedCategory,
+                                note: note.isEmpty ? nil : note
+                            )
+                            if viewModel.successMessage != nil {
+                                dismiss()
+                            }
+                        }
+                    }
+                    .disabled(viewModel.isSubmittingEvent)
+                }
+            }
+            .overlay {
+                if viewModel.isSubmittingEvent {
+                    ZStack {
+                        Color.black.opacity(0.3)
+                            .ignoresSafeArea()
+                        ProgressView("Submitting...")
+                            .padding()
+                            .background(Color.white)
+                            .cornerRadius(10)
+                    }
+                }
+            }
+        }
+    }
 }
 
 #Preview {
