@@ -59,6 +59,9 @@ To reduce caregiver anxiety, the live recording mode streams audio in chunks and
 - Clickable link: [Demo video (local)](Demo/WhyMyBabyCries_APP_Demo.mov)
 - Public link: [YouTube Shorts](https://youtube.com/shorts/dPlRg4Gif98?feature=share)
 
+Thumbnail:
+[![Demo video thumbnail](https://img.youtube.com/vi/dPlRg4Gif98/hqdefault.jpg)](https://youtube.com/shorts/dPlRg4Gif98?feature=share)
+
 ---
 
 **Sample Audio (For Quick Testing)**
@@ -73,12 +76,12 @@ curl -X POST http://localhost:8000/api/events/crying \
 
 ---
 
-**Screenshots**
+**Screenshots (70% size)**
 | Screen | Preview |
 |---|---|
-| Home | ![Home Page](Demo/HomePage.jpg) |
-| Insights | ![Insights](Demo/Insights.jpg) |
-| Status | ![Status](Demo/Status.jpg) |
+| Home | <img src="Demo/HomePage.jpg" width="70%" alt="Home Page"> |
+| Insights | <img src="Demo/Insights.jpg" width="70%" alt="Insights"> |
+| Status | <img src="Demo/Status.jpg" width="70%" alt="Status"> |
 
 ---
 
