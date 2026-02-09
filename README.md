@@ -1,6 +1,6 @@
 # WhyMyBabyCries_Agent
 
- This Gemini 3 hackathon project uses multimodal crying analysis plus recent care context to deliver actionable, low-anxiety guidance for new parents. The goal is to help caregivers soothe faster, rest more, and worry less.
+This Gemini 3 hackathon project uses multimodal crying analysis plus recent care context to deliver actionable, low-anxiety guidance for new parents. The goal is to help caregivers soothe faster, rest more, and worry less.
 
 **Demo Video**
 - Public link: [YouTube Shorts](https://youtube.com/shorts/dPlRg4Gif98?feature=share)
@@ -16,16 +16,24 @@
 ---
 
 **Background Story**
-One of us is a first-time dad. There is so much joy, but also many nights of being jolted awake by a baby’s back-to-back cries and the constant worry that something might be wrong. The parents take turns holding, feeding, and changing diapers, yet still guess the cause wrong and feel more anxious with every guess. We wanted a system that feels like an experienced caregiver assistant: not just “maybe hungry,” but a clear next action based on recent feeding, sleep, and diaper history. When evidence is limited, it should say so explicitly. The outcome we care about most is giving parents a calm, effective loop so they can care with confidence and reclaim rest.
+One of us is a first-time dad. There is so much joy, but also many nights of being jolted awake by a baby's back-to-back cries and the constant worry that something might be wrong. The parents take turns holding, feeding, and changing diapers, yet still guess the cause wrong and feel more anxious with every guess. We wanted a system that feels like an experienced caregiver assistant: not just "maybe hungry," but a clear next action based on recent feeding, sleep, and diaper history. When evidence is limited, it should say so explicitly. The outcome we care about most is giving parents a calm, effective loop so they can care with confidence and reclaim rest.
 
 ---
 
-**Core Features**
-- Multimodal crying analysis: upload audio or record live to get transcription + cause probabilities.
-- Contextual reasoning: fuses last 24 hours of feeding/diaper/sleep to guide the next action.
-- Low-latency live hints: streaming chunks return partial guidance every 3 chunks.
-- Feedback learning: helpful/unhelpful feedback updates day/night priors.
-- Safe and explainable: confidence level, alternatives, and caregiver notices (no medical diagnosis).
+**Gemini 3 Integration**
+This project uses Gemini 3 as the core reasoning engine for "crying audio + care context" multimodal analysis. When a crying event arrives, the backend sends Gemini 3 a structured context payload (recent feeding/diaper/sleep timestamps, recent AI guidance, and learned caregiver feedback priors) together with the audio as `inlineData`. We enforce a strict JSON output contract so Gemini 3 returns exactly two top-level objects: `audio_analysis` (transcription plus cause probability distribution) and `ai_guidance` (most likely cause, alternatives, recommended actions, and caregiver notice).
+
+To reduce caregiver anxiety, the live recording mode streams audio in chunks and requests partial Gemini 3 reasoning every 3 chunks, producing low-latency hints before the final result. When recent context is insufficient, the system includes an uncertainty note rather than over-confident advice. We also write caregiver feedback (helpful/unhelpful) into day/night prior distributions and blend those priors into subsequent reasoning. In short, Gemini 3's multimodal understanding and structured reasoning are the application's core, turning raw crying audio into explainable, actionable guidance.
+
+---
+
+**Judge-Facing Highlights**
+- Gemini 3 multimodal reasoning is the core of the product, not a wrapper: crying audio is sent as `inlineData` with structured care context, and the response must follow a strict JSON contract (`audio_analysis` + `ai_guidance`).
+- The required ~200-word Gemini 3 write-up is embedded above, detailing how multimodal input, structured outputs, and low-latency partial reasoning are central to the app workflow.
+- Real-time experience: partial Gemini 3 calls every 3 audio chunks provide immediate guidance to reduce caregiver anxiety.
+- Context memory for better accuracy: every care update and cry analysis is stored locally and fed back into the next Gemini 3 request, improving personalization and enabling proactive notices before a cry escalates.
+- Safety-first UX: confidence levels, alternatives, and explicit uncertainty when context is limited (no medical diagnosis).
+- Learning loop: caregiver feedback updates day/night priors and is blended into future Gemini 3 guidance.
 
 ---
 
@@ -51,16 +59,9 @@ AB_AUTO_SPLIT=false
 
 ---
 
-**Gemini 3 Integration **
-This project uses Gemini 3 as the core reasoning engine for “crying audio + care context” multimodal analysis. When a crying event arrives, the backend sends Gemini 3 a structured context payload (recent feeding/diaper/sleep timestamps, recent AI guidance, and learned caregiver feedback priors) together with the audio as `inlineData`. We enforce a strict JSON output contract so Gemini 3 returns exactly two top-level objects: `audio_analysis` (transcription plus cause probability distribution) and `ai_guidance` (most likely cause, alternatives, recommended actions, and caregiver notice).
-
-To reduce caregiver anxiety, the live recording mode streams audio in chunks and requests partial Gemini 3 reasoning every 3 chunks, producing low-latency hints before the final result. When recent context is insufficient, the system includes an uncertainty note rather than over-confident advice. We also write caregiver feedback (helpful/unhelpful) into day/night prior distributions and blend those priors into subsequent reasoning. In short, Gemini 3’s multimodal understanding and structured reasoning are the application’s core, turning raw crying audio into explainable, actionable guidance.
-
----
-
 **Demo Flow**
 1. Record a crying clip (or use live recording).
-2. Trigger reasoning and review “most likely cause + next action.”
+2. Trigger reasoning and review "most likely cause + next action."
 3. Mark feedback and observe metrics (helpful rate / resolved time).
 
 ---
