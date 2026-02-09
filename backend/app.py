@@ -7,14 +7,15 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(dotenv_path=os.path.join(BASE_DIR, ".env"))
 except Exception:
     pass
 
-MEMORY_FILE = os.path.join("agent", "memory.json")
-UPLOAD_DIR = "uploads"
+MEMORY_FILE = os.path.join(BASE_DIR, "agent", "memory.json")
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
 AB_AUTO_SPLIT = os.getenv("AB_AUTO_SPLIT", "false").lower() == "true"
 LIVE_CHUNK_MAX_BYTES = 512 * 1024
@@ -512,7 +513,7 @@ class APIMockHandler(BaseHTTPRequestHandler):
             audio_file_path = os.path.join(UPLOAD_DIR, f"{payload['audio_id']}{extension}")
             with open(audio_file_path, "wb") as f:
                 f.write(audio_bytes)
-            payload["audio_path"] = audio_file_path.replace("\\", "/")
+            payload["audio_path"] = os.path.relpath(audio_file_path, BASE_DIR).replace("\\", "/")
             payload["audio_mime_type"] = audio_mime_type
 
         payload["audio_url"] = body.get("audio_url") or payload.get("audio_url")
@@ -580,7 +581,7 @@ class APIMockHandler(BaseHTTPRequestHandler):
         payload.pop("ai_guidance", None)
         payload["audio_id"] = audio_id
         payload["audio_mime_type"] = mime_type
-        payload["audio_path"] = live_file_path.replace("\\", "/")
+        payload["audio_path"] = os.path.relpath(live_file_path, BASE_DIR).replace("\\", "/")
         payload["notice"] = self._compose_notice()
         payload["streaming"] = streaming
 

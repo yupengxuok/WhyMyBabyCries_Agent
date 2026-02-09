@@ -1,4 +1,10 @@
-# WhyMyBabyCries_Agent
+# WhyMyBabyCries_Agent (Backend)
+
+Run this backend from the `backend/` directory:
+```bash
+cd backend
+python app.py
+```
 
 ---
 

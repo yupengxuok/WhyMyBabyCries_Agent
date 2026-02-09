@@ -27,7 +27,8 @@ def plivo_speak(message: str):
 
 # ====== Agent Memory ======
 
-MEMORY_FILE = "agent/memory.json"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MEMORY_FILE = os.path.join(BASE_DIR, "memory.json")
 
 def _iso_now():
     return datetime.utcnow().isoformat() + "Z"

@@ -14,8 +14,9 @@ from datetime import datetime, timezone
 import requests
 
 
-PROMPT_FILE = os.path.join("engine", "prompt.txt")
-SCHEMA_FILE = os.path.join("engine", "schema.json")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROMPT_FILE = os.path.join(BASE_DIR, "prompt.txt")
+SCHEMA_FILE = os.path.join(BASE_DIR, "schema.json")
 CAUSE_LABELS = ("hunger", "discomfort", "emotional_need", "unknown")
 
 

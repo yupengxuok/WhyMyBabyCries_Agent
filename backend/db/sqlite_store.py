@@ -3,7 +3,8 @@ import os
 import sqlite3
 from datetime import timezone
 
-DB_FILE = "db.sqlite"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(BASE_DIR, "..", "db.sqlite")
 
 
 def get_conn():
