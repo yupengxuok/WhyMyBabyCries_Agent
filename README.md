@@ -55,19 +55,19 @@ To reduce caregiver anxiety, the live recording mode streams audio in chunks and
 ---
 
 **Demo Video**
-- Local file: `demo/WhyMyBabyCries_APP_Demo.mov`
-- Clickable link: [Demo video (local)](demo/WhyMyBabyCries_APP_Demo.mov)
+- Local file: `Demo/WhyMyBabyCries_APP_Demo.mov`
+- Clickable link: [Demo video (local)](Demo/WhyMyBabyCries_APP_Demo.mov)
 
 ---
 
 **Sample Audio (For Quick Testing)**
-- Local file: `demo/BabyCries_Test.m4a`
-- Clickable link: [Sample cry audio (local)](demo/BabyCries_Test.m4a)
+- Local file: `Demo/BabyCries_Test.m4a`
+- Clickable link: [Sample cry audio (local)](Demo/BabyCries_Test.m4a)
 - Example request:
 ```bash
 curl -X POST http://localhost:8000/api/events/crying \
   -F "occurred_at=2026-02-08T10:02:00Z" \
-  -F "audio=@demo/BabyCries_Test.m4a"
+  -F "audio=@Demo/BabyCries_Test.m4a"
 ```
 
 ---
@@ -75,9 +75,9 @@ curl -X POST http://localhost:8000/api/events/crying \
 **Screenshots**
 | Screen | Preview |
 |---|---|
-| Home | ![Home Page](demo/HomePage.jpg) |
-| Insights | ![Insights](demo/Insights.jpg) |
-| Status | ![Status](demo/Status.jpg) |
+| Home | ![Home Page](Demo/HomePage.jpg) |
+| Insights | ![Insights](Demo/Insights.jpg) |
+| Status | ![Status](Demo/Status.jpg) |
 
 ---
 
