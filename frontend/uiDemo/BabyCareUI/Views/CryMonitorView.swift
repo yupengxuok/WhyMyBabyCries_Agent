@@ -8,6 +8,7 @@ enum MonitorStatus: String {
     case error = "Error"
 }
 
+@MainActor
 final class CryMonitorViewModel: ObservableObject {
     @Published var status: MonitorStatus = .idle
     @Published var currentVolume: Float = 0
@@ -16,32 +17,29 @@ final class CryMonitorViewModel: ObservableObject {
     @Published var errorMessage: String? = nil
     @Published var debugInfo: String = ""
 
+    @Published var partialGuidance: PartialGuidance? = nil
+    @Published var finalGuidance: AIGuidance? = nil
+    @Published var noticeText: String? = nil
+    @Published var guidanceUnavailable: Bool = false
+    @Published var finalConfidenceLevel: String? = nil
+    @Published var finalUncertaintyNote: String? = nil
+
     private let audioEngine = AVAudioEngine()
     private var inputFormat: AVAudioFormat?
     private var inputConverter: AVAudioConverter?
     private var targetInputFormat: AVAudioFormat?
-    private let playerNode = AVAudioPlayerNode()
-    private var outputFormat: AVAudioFormat?
-    private var geminiClient: GeminiLiveClient?
+
     private var isSessionActive = false
     private var isSessionReady = false
-    private var sentFrameCount = 0
-    private var receivedAudioCount = 0
-    private var receivedTranscriptCount = 0
+    private var streamId: String?
+    private var eventId: String?
+    private var chunksSent = 0
+
     private let audioSendQueue = DispatchQueue(label: "babycare.audio.send.queue")
-    private let sendStride = 3
+    private let sendStride = 1
     private var sendGateCounter = 0
 
-    private let systemPrompt = """
-    You are a warm, gentle, and musical nanny AI designed to soothe crying babies.
-    When you detect distress, your goal is to immediately offer comfort.
-    Rules:
-    1. Use a soft, melodic, and rhythmic voice.
-    2. Hum gentle lullabies or tell very short, calming stories about fluffy clouds and sleepy animals.
-    3. Keep sentences short and repetitive (like "It's okay, little one", "Shhh, I am here").
-    4. If the baby keeps crying, try a different approach: gentle singing or mimicking a heartbeat sound.
-    5. Do not stop until the environment becomes quiet.
-    """
+    private let apiClient = APIClient.shared
 
     func startMonitoring() {
         errorMessage = nil
@@ -55,11 +53,6 @@ final class CryMonitorViewModel: ObservableObject {
                     self.errorMessage = "Microphone permission denied."
                     return
                 }
-                if self.apiKey.isEmpty || self.apiKey == "REPLACE_WITH_YOUR_API_KEY" {
-                    self.status = .error
-                    self.errorMessage = "Missing Gemini API key in Info.plist."
-                    return
-                }
                 self.configureAndStartEngine()
             }
         }
@@ -67,18 +60,17 @@ final class CryMonitorViewModel: ObservableObject {
 
     func stopMonitoring() {
         audioEngine.inputNode.removeTap(onBus: 0)
-        stopPlayback()
-        geminiClient?.close()
-        geminiClient = nil
-        isSessionActive = false
-        isSessionReady = false
-        sentFrameCount = 0
-        receivedAudioCount = 0
-        receivedTranscriptCount = 0
-        debugInfo = ""
         audioEngine.stop()
-        status = .idle
         currentVolume = 0
+
+        if isSessionActive, let streamId = streamId {
+            Task {
+                await finishLiveSession(streamId: streamId)
+            }
+        } else {
+            resetSessionState()
+            status = .idle
+        }
     }
 
     private func configureAndStartEngine() {
@@ -94,13 +86,6 @@ final class CryMonitorViewModel: ObservableObject {
             targetInputFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)
             if let targetInputFormat = targetInputFormat {
                 inputConverter = AVAudioConverter(from: format, to: targetInputFormat)
-            }
-
-            if playerNode.engine == nil {
-                audioEngine.attach(playerNode)
-                let outFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 24000, channels: 1, interleaved: false)
-                outputFormat = outFormat
-                audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: outFormat)
             }
 
             inputNode.removeTap(onBus: 0)
@@ -131,16 +116,17 @@ final class CryMonitorViewModel: ObservableObject {
         DispatchQueue.main.async {
             self.currentVolume = rms
             if self.status == .listening && !self.isSessionActive && (self.threshold == 0 || rms > self.threshold) {
-                self.startGeminiSession()
-                self.appendHistory("Cry detected. Comforting...")
+                self.isSessionActive = true
+                self.appendHistory("Cry detected. Starting live stream...")
+                Task {
+                    await self.startLiveSession()
+                }
             }
         }
 
-        if isSessionActive {
-            if let copied = copyBuffer(buffer) {
-                audioSendQueue.async { [weak self] in
-                    self?.sendAudioToGemini(buffer: copied)
-                }
+        if isSessionActive, isSessionReady, let copied = copyBuffer(buffer) {
+            audioSendQueue.async { [weak self] in
+                self?.sendAudioChunk(buffer: copied)
             }
         }
     }
@@ -152,94 +138,33 @@ final class CryMonitorViewModel: ObservableObject {
         }
     }
 
-    private var apiKey: String {
-        Bundle.main.object(forInfoDictionaryKey: "GEMINI_API_KEY") as? String ?? ""
-    }
-
-    private func startGeminiSession() {
-        guard !apiKey.isEmpty else { return }
-
-        let modelName = "models/gemini-2.5-flash-native-audio-preview-12-2025"
-        let client = GeminiLiveClient(
-            apiKey: apiKey,
-            model: modelName,
-            systemInstruction: systemPrompt,
-            voiceName: "Kore"
+    private func startLiveSession() async {
+        let request = LiveStartRequest(
+            occurredAt: DateHelpers.isoNow(),
+            abVariant: nil,
+            audioMimeType: "audio/pcm;rate=16000",
+            payload: ["note": "live recording"],
+            tags: nil
         )
 
-        client.onAudio = { [weak self] base64, mimeType in
-            DispatchQueue.main.async {
-                self?.receivedAudioCount += 1
-                self?.updateDebugInfo()
-                self?.playAudio(base64: base64, mimeType: mimeType)
-            }
+        do {
+            let response = try await apiClient.startLiveCrying(request: request)
+            streamId = response.streamId
+            eventId = response.eventId
+            isSessionReady = true
+            status = .active
+            appendHistory("Live stream started.")
+            updateDebugInfo()
+        } catch {
+            status = .error
+            errorMessage = error.localizedDescription
+            isSessionActive = false
+            isSessionReady = false
         }
-        client.onInputTranscription = { [weak self] text in
-            DispatchQueue.main.async {
-                self?.receivedTranscriptCount += 1
-                self?.updateDebugInfo()
-                self?.appendHistory("Baby: \(text)")
-            }
-        }
-        client.onOutputTranscription = { [weak self] text in
-            DispatchQueue.main.async {
-                self?.receivedTranscriptCount += 1
-                self?.updateDebugInfo()
-                self?.appendHistory("AI: \(text)")
-            }
-        }
-        client.onTextResponse = { [weak self] text in
-            DispatchQueue.main.async {
-                self?.appendHistory("💬 \(text)")
-            }
-        }
-        client.onInterrupted = { [weak self] in
-            DispatchQueue.main.async {
-                self?.stopPlayback()
-            }
-        }
-        client.onError = { [weak self] message in
-            DispatchQueue.main.async {
-                self?.status = .error
-                self?.errorMessage = message
-                self?.isSessionActive = false
-                self?.isSessionReady = false
-            }
-        }
-        client.onClosed = { [weak self] reason in
-            DispatchQueue.main.async {
-                if let reason = reason {
-                    self?.errorMessage = "Socket closed: \(reason)"
-                } else {
-                    self?.errorMessage = "Socket closed."
-                }
-                self?.status = .error
-                self?.isSessionActive = false
-                self?.isSessionReady = false
-            }
-        }
-        client.onConnected = { [weak self] in
-            DispatchQueue.main.async {
-                self?.updateDebugInfo()
-            }
-        }
-        client.onSetupComplete = { [weak self] in
-            DispatchQueue.main.async {
-                self?.status = .active
-                self?.isSessionReady = true
-                self?.appendHistory("Session ready. Listening...")
-                self?.updateDebugInfo()
-            }
-        }
-
-        geminiClient = client
-        isSessionActive = true
-        status = .listening
-        client.connect()
     }
 
-    private func sendAudioToGemini(buffer: AVAudioPCMBuffer) {
-        guard isSessionReady else { return }
+    private func sendAudioChunk(buffer: AVAudioPCMBuffer) {
+        guard isSessionReady, let streamId = streamId else { return }
         guard let converter = inputConverter, let targetInputFormat = targetInputFormat else { return }
 
         sendGateCounter += 1
@@ -262,50 +187,76 @@ final class CryMonitorViewModel: ObservableObject {
         if error != nil { return }
 
         guard let pcmData = AudioPCMConverter.int16Data(from: convertedBuffer) else { return }
-        let mimeType = "audio/pcm;rate=16000"
-        let base64 = pcmData.base64EncodedString()
-        geminiClient?.sendAudio(base64Data: base64, mimeType: mimeType)
-        DispatchQueue.main.async {
-            self.sentFrameCount += 1
-            self.updateDebugInfo()
-        }
-    }
+        if pcmData.count > 512 * 1024 { return }
 
-    private func stopPlayback() {
-        if playerNode.isPlaying {
-            playerNode.stop()
-        }
-    }
-
-    private func playAudio(base64: String, mimeType: String) {
-        guard let data = Data(base64Encoded: base64) else { return }
-        guard let format = outputFormat else { return }
-
-        let sampleCount = data.count / MemoryLayout<Int16>.size
-        guard sampleCount > 0 else { return }
-
-        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(sampleCount))
-        buffer?.frameLength = AVAudioFrameCount(sampleCount)
-
-        guard let channel = buffer?.floatChannelData?[0] else { return }
-        data.withUnsafeBytes { rawBuffer in
-            let int16Buffer = rawBuffer.bindMemory(to: Int16.self)
-            for i in 0..<sampleCount {
-                let sample = Float(int16Buffer[i]) / 32768.0
-                channel[i] = sample
+        Task {
+            do {
+                let response = try await apiClient.sendLiveChunk(streamId: streamId, chunk: pcmData, mimeType: "audio/pcm;rate=16000")
+                if let partial = response.partialGuidance {
+                    partialGuidance = partial
+                    updateDebugInfo()
+                }
+                chunksSent += 1
+            } catch {
+                self.status = .error
+                self.errorMessage = error.localizedDescription
             }
         }
+    }
 
-        if !playerNode.isPlaying {
-            playerNode.play()
+    private func finishLiveSession(streamId: String) async {
+        do {
+            let response = try await apiClient.finishLiveCrying(streamId: streamId)
+            if let event = response.event {
+                applyFinalEvent(event)
+            }
+            appendHistory("Live stream completed.")
+        } catch {
+            errorMessage = error.localizedDescription
+            status = .error
         }
-        if let buffer = buffer {
-            playerNode.scheduleBuffer(buffer, completionHandler: nil)
+
+        resetSessionState()
+        status = .idle
+    }
+
+    private func applyFinalEvent(_ event: APIEvent) {
+        if let payload = event.payload {
+            noticeText = payload.notice
+            if let guidance = payload.aiGuidance {
+                finalGuidance = guidance
+                guidanceUnavailable = false
+                finalConfidenceLevel = guidance.confidenceLevel
+                finalUncertaintyNote = guidance.uncertaintyNote
+            } else {
+                finalGuidance = nil
+                guidanceUnavailable = true
+                finalConfidenceLevel = nil
+                finalUncertaintyNote = nil
+            }
+        } else {
+            noticeText = nil
+            finalGuidance = nil
+            guidanceUnavailable = true
+            finalConfidenceLevel = nil
+            finalUncertaintyNote = nil
         }
+    }
+
+    private func resetSessionState() {
+        isSessionActive = false
+        isSessionReady = false
+        streamId = nil
+        eventId = nil
+        sendGateCounter = 0
+        chunksSent = 0
+        updateDebugInfo()
     }
 
     private func updateDebugInfo() {
-        debugInfo = "sent:\(sentFrameCount) recv_audio:\(receivedAudioCount) recv_text:\(receivedTranscriptCount)"
+        let idText = eventId ?? "-"
+        let streamText = streamId ?? "-"
+        debugInfo = "event:\(idText) stream:\(streamText) chunks:\(chunksSent)"
     }
 
     private func copyBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
@@ -398,104 +349,185 @@ struct CryMonitorView: View {
                                     ZStack(alignment: .leading) {
                                         RoundedRectangle(cornerRadius: 6)
                                             .fill(Color.white)
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 6)
-                                                    .stroke(Color.dividerGray, lineWidth: 1)
-                                            )
+                                            .frame(height: 12)
                                         RoundedRectangle(cornerRadius: 6)
-                                            .fill(viewModel.currentVolume > viewModel.threshold ? Color.cryRed : Color.appBlue)
-                                            .frame(width: geo.size.width * CGFloat(min(viewModel.currentVolume * 2, 1)))
+                                            .fill(Color.appBlue)
+                                            .frame(width: CGFloat(viewModel.currentVolume) * geo.size.width * 8, height: 12)
                                     }
                                 }
-                                .frame(height: 10)
+                                .frame(height: 12)
                             }
                         }
-                        .padding(20)
-                        .background(Color.softBlue.opacity(0.4))
-                        .cornerRadius(18)
+                        .padding(.horizontal)
 
-                        VStack(spacing: 8) {
-                            if viewModel.history.isEmpty {
-                                Text(viewModel.status == .idle ? "Source: Microphone" : "Listening...")
-                                    .font(.caption)
-                                    .foregroundColor(.softGray)
-                            } else {
-                                ForEach(viewModel.history.indices, id: \.self) { idx in
-                                    Text(viewModel.history[idx])
-                                        .font(.caption)
-                                        .foregroundColor(.appBlue)
-                                }
+                        HStack(spacing: 16) {
+                            Button(action: viewModel.startMonitoring) {
+                                Label("Start", systemImage: "play.fill")
+                                    .frame(maxWidth: .infinity)
                             }
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 90)
-                        .padding(.vertical, 8)
-                        .background(Color.white)
-                        .cornerRadius(16)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16)
-                                .stroke(Color.dividerGray, lineWidth: 1)
-                        )
+                            .buttonStyle(.borderedProminent)
 
-                        HStack {
-                            if viewModel.status == .idle || viewModel.status == .error {
-                                Button {
-                                    viewModel.startMonitoring()
-                                } label: {
-                                    Text("Start Monitoring")
-                                        .font(.headline)
-                                        .foregroundColor(.white)
-                                        .padding(.horizontal, 28)
-                                        .padding(.vertical, 12)
-                                        .background(Color.appBlue)
-                                        .cornerRadius(16)
-                                }
-                            } else {
-                                Button {
-                                    viewModel.stopMonitoring()
-                                } label: {
-                                    Text("Stop Session")
-                                        .font(.headline)
-                                        .foregroundColor(.cryRed)
-                                        .padding(.horizontal, 28)
-                                        .padding(.vertical, 12)
-                                        .background(Color.white)
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 16)
-                                                .stroke(Color.cryRed, lineWidth: 2)
-                                        )
-                                }
+                            Button(action: viewModel.stopMonitoring) {
+                                Label("Stop", systemImage: "stop.fill")
+                                    .frame(maxWidth: .infinity)
                             }
+                            .buttonStyle(.bordered)
                         }
+                        .padding(.horizontal)
 
                         if let error = viewModel.errorMessage {
                             Text(error)
                                 .font(.caption)
-                                .foregroundColor(.cryRed)
-                                .padding(.vertical, 8)
-                                .padding(.horizontal, 12)
-                                .background(Color.cryRed.opacity(0.1))
-                                .cornerRadius(12)
+                                .foregroundColor(.red)
+                                .multilineTextAlignment(.center)
                         }
-                        if !viewModel.debugInfo.isEmpty {
-                            Text(viewModel.debugInfo)
-                                .font(.caption2)
+                    }
+
+                    if let notice = viewModel.noticeText {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Notice")
+                                .font(.sectionTitle)
+                                .foregroundColor(.appBlue)
+                            Text(notice)
+                                .font(.bodyRounded)
+                                .foregroundColor(.secondary)
+                                .lineSpacing(4)
+                        }
+                        .padding(20)
+                        .cardStyle()
+                        .padding(.horizontal)
+                    }
+
+                    GuidanceSection(title: "Live Guidance", guidance: viewModel.partialGuidance)
+                        .padding(.horizontal)
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Final Guidance")
+                            .font(.sectionTitle)
+                            .foregroundColor(.appBlue)
+
+                        if let guidance = viewModel.finalGuidance {
+                            GuidanceDetailView(guidance: guidance)
+                        } else if viewModel.guidanceUnavailable {
+                            Text("Guidance unavailable.")
+                                .font(.bodyRounded)
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text("Awaiting final analysis...")
+                                .font(.bodyRounded)
+                                .foregroundColor(.secondary)
+                        }
+
+                        if let confidence = viewModel.finalConfidenceLevel {
+                            Text("Confidence: \(confidence)")
+                                .font(.caption)
+                                .foregroundColor(.softGray)
+                        }
+
+                        if let note = viewModel.finalUncertaintyNote {
+                            Text(note)
+                                .font(.caption)
                                 .foregroundColor(.softGray)
                         }
                     }
-                    .padding(24)
+                    .padding(20)
                     .cardStyle()
                     .padding(.horizontal)
 
-                    Text("Tip: Place the device near the baby. Adjust the threshold if it triggers too easily.")
+                    if !viewModel.history.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Session History")
+                                .font(.sectionTitle)
+                                .foregroundColor(.appBlue)
+                            ForEach(viewModel.history.indices, id: \.self) { index in
+                                Text(viewModel.history[index])
+                                    .font(.caption)
+                                    .foregroundColor(.softGray)
+                            }
+                        }
+                        .padding(20)
+                        .cardStyle()
+                        .padding(.horizontal)
+                    }
+
+                    Text(viewModel.debugInfo)
                         .font(.caption2)
                         .foregroundColor(.softGray)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 28)
                 }
-                .padding(.vertical)
+                .padding(.vertical, 24)
             }
             .background(Color.softBlue.ignoresSafeArea())
-            .navigationTitle("Cry Monitor")
+            .navigationTitle("Live Monitor")
+        }
+    }
+}
+
+private struct GuidanceSection: View {
+    let title: String
+    let guidance: PartialGuidance?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.sectionTitle)
+                .foregroundColor(.appBlue)
+
+            if let guidance = guidance {
+                if let cause = guidance.mostLikelyCause?.label {
+                    Text("Most likely: \(cause)")
+                        .font(.bodyRounded)
+                }
+                if let action = guidance.recommendedNextAction {
+                    Text("Next action: \(action)")
+                        .font(.bodyRounded)
+                        .foregroundColor(.secondary)
+                }
+                if let confidence = guidance.confidenceLevel {
+                    Text("Confidence: \(confidence)")
+                        .font(.caption)
+                        .foregroundColor(.softGray)
+                }
+            } else {
+                Text("Listening for partial guidance...")
+                    .font(.bodyRounded)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(20)
+        .cardStyle()
+    }
+}
+
+private struct GuidanceDetailView: View {
+    let guidance: AIGuidance
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let cause = guidance.mostLikelyCause?.label {
+                Text("Most likely: \(cause)")
+                    .font(.headline)
+            }
+            if let reasoning = guidance.mostLikelyCause?.reasoning {
+                Text(reasoning)
+                    .font(.bodyRounded)
+                    .foregroundColor(.secondary)
+            }
+            if let actions = guidance.recommendedActions, !actions.isEmpty {
+                Text("Recommended actions")
+                    .font(.caption.weight(.bold))
+                    .foregroundColor(.softGray)
+                ForEach(actions.indices, id: \.self) { index in
+                    let action = actions[index]
+                    Text("\(action.step ?? index + 1). \(action.action ?? "")")
+                        .font(.bodyRounded)
+                        .foregroundColor(.primary)
+                }
+            }
+            if let notice = guidance.caregiverNotice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundColor(.softGray)
+            }
         }
     }
 }
