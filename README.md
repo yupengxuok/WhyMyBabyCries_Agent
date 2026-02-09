@@ -57,6 +57,7 @@ To reduce caregiver anxiety, the live recording mode streams audio in chunks and
 **Demo Video**
 - Local file: `Demo/WhyMyBabyCries_APP_Demo.mov`
 - Clickable link: [Demo video (local)](Demo/WhyMyBabyCries_APP_Demo.mov)
+- Public link: [YouTube Shorts](https://youtube.com/shorts/dPlRg4Gif98?feature=share)
 
 ---
 
@@ -88,5 +89,5 @@ curl -X POST http://localhost:8000/api/events/crying \
 ---
 
 **Submission (Fill In)**
-- Public demo video: `<your_video_url>`
+- Public demo video: `https://youtube.com/shorts/dPlRg4Gif98?feature=share`
 - Public code repo: `<your_repo_url>`
