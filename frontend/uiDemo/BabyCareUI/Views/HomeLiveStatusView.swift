@@ -3,6 +3,8 @@ import SwiftUI
 @MainActor
 final class HomeLiveStatusViewModel: ObservableObject {
     @Published var activities: [TimelineActivity] = []
+    @Published var latestGuidance: AIGuidance? = nil
+    @Published var guidanceUnavailable: Bool = false
     @Published var isLoading: Bool = false
     @Published var errorMessage: String? = nil
 
@@ -25,10 +27,25 @@ final class HomeLiveStatusViewModel: ObservableObject {
             timelineActivities.append(contentsOf: createMockActivities())
 
             activities = timelineActivities
+            if let latestCrying = events.first(where: { $0.category == "crying" }) {
+                if let guidance = latestCrying.payload?.aiGuidance {
+                    latestGuidance = guidance
+                    guidanceUnavailable = false
+                } else {
+                    latestGuidance = nil
+                    guidanceUnavailable = true
+                }
+            } else {
+                latestGuidance = nil
+                guidanceUnavailable = false
+            }
             isLoading = false
         } catch {
             isLoading = false
             errorMessage = error.localizedDescription
+            activities = createMockActivities()
+            latestGuidance = nil
+            guidanceUnavailable = false
         }
     }
 
@@ -61,11 +78,11 @@ final class HomeLiveStatusViewModel: ObservableObject {
 
     private func createMockActivities() -> [TimelineActivity] {
         [
-            TimelineActivity(assetName: "RecentFeeding", title: "Feeding", time: "5 mins ago"),
-            TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "30 mins ago"),
-            TimelineActivity(assetName: "RecentCrying", title: "Crying", time: "45 mins ago"),
-            TimelineActivity(assetName: "RecentFeeding", title: "Feeding", time: "1 hr ago"),
-            TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "2 hrs ago")
+            TimelineActivity(assetName: "RecentFeeding", title: "Feeding", time: "5 mins ago · Mock"),
+            TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "30 mins ago · Mock"),
+            TimelineActivity(assetName: "RecentCrying", title: "Crying", time: "45 mins ago · Mock"),
+            TimelineActivity(assetName: "RecentFeeding", title: "Feeding", time: "1 hr ago · Mock"),
+            TimelineActivity(assetName: "RecentSleeping", title: "Sleeping", time: "2 hrs ago · Mock")
         ]
     }
 }
@@ -82,7 +99,11 @@ struct HomeLiveStatusView: View {
                 VStack(spacing: 22) {
                     HomeTopBar()
 
-                    StatusInsightCard()
+                    StatusInsightCard(
+                        guidance: viewModel.latestGuidance,
+                        guidanceUnavailable: viewModel.guidanceUnavailable,
+                        isLoading: viewModel.isLoading
+                    )
                     .padding(.horizontal, 20)
 
                     RecentActivitySection(activities: viewModel.activities)
@@ -124,13 +145,29 @@ private struct HomeTopBar: View {
 }
 
 private struct StatusInsightCard: View {
+    let guidance: AIGuidance?
+    let guidanceUnavailable: Bool
+    let isLoading: Bool
+
     var body: some View {
         VStack(spacing: 16) {
             BabyIllustration()
 
-            Text("80% Likely hungry")
-                .font(.system(size: 28, weight: .bold, design: .rounded))
-                .foregroundColor(.primary)
+            if isLoading {
+                Text("Loading latest guidance...")
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundColor(.primary)
+            } else if let guidance = guidance, let label = guidance.mostLikelyCause?.label {
+                let confidence = guidance.mostLikelyCause?.confidence ?? 0.8
+                let percent = Int(confidence * 100)
+                Text("\(percent)% likely \(label)")
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .foregroundColor(.primary)
+            } else {
+                Text("80% likely hungry")
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .foregroundColor(.primary)
+            }
 
             HStack(spacing: 8) {
                 HStack(spacing: 6) {
@@ -141,7 +178,7 @@ private struct StatusInsightCard: View {
                     }
                 }
 
-                Text("Medium Confidence")
+                Text(guidance?.confidenceLevel?.capitalized ?? "Medium Confidence")
                     .font(.bodyRounded)
                     .foregroundColor(.softGray)
             }
