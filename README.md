@@ -2,6 +2,17 @@
 
  This Gemini 3 hackathon project uses multimodal crying analysis plus recent care context to deliver actionable, low-anxiety guidance for new parents. The goal is to help caregivers soothe faster, rest more, and worry less.
 
+**Demo Video**
+- Public link: [YouTube Shorts](https://youtube.com/shorts/dPlRg4Gif98?feature=share)
+- Local file: `Demo/WhyMyBabyCries_APP_Demo.mov`
+- Clickable link: [Demo video (local)](Demo/WhyMyBabyCries_APP_Demo.mov)
+
+<p align="center">
+  <a href="https://youtube.com/shorts/dPlRg4Gif98?feature=share">
+    <img src="https://img.youtube.com/vi/dPlRg4Gif98/hqdefault.jpg" alt="Demo video thumbnail">
+  </a>
+</p>
+
 ---
 
 **Background Story**
@@ -54,16 +65,6 @@ To reduce caregiver anxiety, the live recording mode streams audio in chunks and
 
 ---
 
-**Demo Video**
-- Local file: `Demo/WhyMyBabyCries_APP_Demo.mov`
-- Clickable link: [Demo video (local)](Demo/WhyMyBabyCries_APP_Demo.mov)
-- Public link: [YouTube Shorts](https://youtube.com/shorts/dPlRg4Gif98?feature=share)
-
-Thumbnail:
-[![Demo video thumbnail](https://img.youtube.com/vi/dPlRg4Gif98/hqdefault.jpg)](https://youtube.com/shorts/dPlRg4Gif98?feature=share)
-
----
-
 **Sample Audio (For Quick Testing)**
 - Local file: `Demo/BabyCries_Test.m4a`
 - Clickable link: [Sample cry audio (local)](Demo/BabyCries_Test.m4a)
@@ -76,12 +77,25 @@ curl -X POST http://localhost:8000/api/events/crying \
 
 ---
 
-**Screenshots (50% size)**
-| Screen | Preview |
-|---|---|
-| Home | <img src="Demo/HomePage.jpg" width="50%" alt="Home Page"> |
-| Insights | <img src="Demo/Insights.jpg" width="50%" alt="Insights"> |
-| Status | <img src="Demo/Status.jpg" width="50%" alt="Status"> |
+**Screenshots**
+<table align="center">
+  <tr>
+    <th>Screen</th>
+    <th>Preview</th>
+  </tr>
+  <tr>
+    <td>Home</td>
+    <td><img src="Demo/HomePage.jpg" width="50%" alt="Home Page"></td>
+  </tr>
+  <tr>
+    <td>Insights</td>
+    <td><img src="Demo/Insights.jpg" width="50%" alt="Insights"></td>
+  </tr>
+  <tr>
+    <td>Status</td>
+    <td><img src="Demo/Status.jpg" width="50%" alt="Status"></td>
+  </tr>
+</table>
 
 ---
 
