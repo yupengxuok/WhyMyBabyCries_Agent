@@ -76,12 +76,12 @@ curl -X POST http://localhost:8000/api/events/crying \
 
 ---
 
-**Screenshots (70% size)**
+**Screenshots (50% size)**
 | Screen | Preview |
 |---|---|
-| Home | <img src="Demo/HomePage.jpg" width="70%" alt="Home Page"> |
-| Insights | <img src="Demo/Insights.jpg" width="70%" alt="Insights"> |
-| Status | <img src="Demo/Status.jpg" width="70%" alt="Status"> |
+| Home | <img src="Demo/HomePage.jpg" width="50%" alt="Home Page"> |
+| Insights | <img src="Demo/Insights.jpg" width="50%" alt="Insights"> |
+| Status | <img src="Demo/Status.jpg" width="50%" alt="Status"> |
 
 ---
 
