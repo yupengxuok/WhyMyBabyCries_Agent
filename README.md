@@ -2,6 +2,15 @@
 
 This Gemini 3 hackathon project uses multimodal crying analysis plus recent care context to deliver actionable, low-anxiety guidance for new parents. The goal is to help caregivers soothe faster, rest more, and worry less.
 
+**Project Intro Video**
+- Public link: [YouTube](https://youtu.be/38tJay2P3ng)
+
+<p align="center">
+  <a href="https://youtu.be/38tJay2P3ng">
+    <img src="https://img.youtube.com/vi/38tJay2P3ng/hqdefault.jpg" alt="Project intro video thumbnail">
+  </a>
+</p>
+
 **Demo Video**
 - Public link: [YouTube Shorts](https://youtube.com/shorts/dPlRg4Gif98?feature=share)
 - Local file: `Demo/WhyMyBabyCries_APP_Demo.mov`
@@ -109,5 +118,5 @@ curl -X POST http://localhost:8000/api/events/crying \
 ---
 
 **Submission (Fill In)**
-- Public demo video: `https://youtube.com/shorts/dPlRg4Gif98?feature=share`
+- Public demo video: `https://youtu.be/38tJay2P3ng`
 - Public code repo: `<your_repo_url>`
